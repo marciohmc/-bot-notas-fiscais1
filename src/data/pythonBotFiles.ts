@@ -128,293 +128,329 @@ export const INITIAL_SHEET_ROWS: SheetRow[] = [
   },
 ];
 
-export const PYTHON_MAIN_CODE = `"""
-Bot de Automação Financeira no Telegram com OCR.space e Google Sheets
-Hospedagem: Render (FastAPI + Uvicorn)
-"""
-
-import os
-import re
+export const PYTHON_MAIN_CODE = `import os
 import json
-import uuid
+import re
 import base64
-import logging
 from datetime import datetime
-from typing import Dict, Any, Optional
-
-import httpx
+from fastapi import FastAPI, Request
 import gspread
 from google.oauth2.service_account import Credentials
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
+import requests
 
-# =====================================================================
-# 1. CONFIGURAÇÃO DE LOGS E VARIÁVEIS DE AMBIENTE
-# =====================================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
-logger = logging.getLogger("FinBotOCR")
+app = FastAPI(title="Meu Bot de Finanças — Telegram + OCR.space + Google Sheets")
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-OCR_SPACE_API_KEY = os.getenv("OCR_SPACE_API_KEY", "")
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
-OCR_ENGINE_DEFAULT = os.getenv("OCR_ENGINE_DEFAULT", "2")  # "2" ou "3"
+# Armazenamento temporário em memória para dados de recibos aguardando categoria
+# Chave: estado_id (file_unique_id curto, seguro para o limite de 64 bytes do callback_data)
+DADOS_TEMPORARIOS = {}
 
-TELEGRAM_API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-TELEGRAM_FILE_BASE = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}"
-OCR_SPACE_ENDPOINT = "https://api.ocr.space/parse/image"
-
-# Categorias solicitadas para o teclado inline
-CATEGORIAS_GASTO = [
-    "Despesa",
-    "Adiantamento",
-    "Manutenção",
-    "Combustível",
-    "Material",
-    "Ferramentas",
-    "Outros"
-]
-
-# =====================================================================
-# 2. GERENCIAMENTO DE ESTADO ASSÍNCRONO EM MEMÓRIA
-# =====================================================================
-# Como o webhook do Telegram é assíncrono e o callback_data tem limite rígido
-# de 64 bytes, armazenamos os dados extraídos do recibo em DADOS_TEMPORARIOS
-# indexados por um token curto (8 caracteres).
-DADOS_TEMPORARIOS: Dict[str, Dict[str, Any]] = {}
-
-app = FastAPI(
-    title="Telegram Financial OCR Bot",
-    description="Processamento de recibos via OCR.space e persistência no Google Sheets",
-    version="1.0.0"
-)
-
-# =====================================================================
-# 3. CONEXÃO COM GOOGLE SHEETS (GSPREAD)
-# =====================================================================
-def obter_planilha_google():
-    """
-    Autentica no Google Cloud via Service Account (JSON em variável de ambiente
-    ou arquivo local) e retorna a primeira aba da planilha configurada.
-    """
+# 1. Configuração do Google Sheets com tratamento de erros
+def obter_planilha():
     try:
+        creds_raw = os.environ.get("GOOGLE_CREDENTIALS_JSON", "{}")
+        creds_dict = json.loads(creds_raw)
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive"
         ]
-        if GOOGLE_CREDENTIALS_JSON.strip().startswith("{"):
-            cred_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
-            creds = Credentials.from_service_account_info(cred_dict, scopes=scopes)
-        else:
-            creds = Credentials.from_service_account_file(
-                GOOGLE_CREDENTIALS_JSON or "service_account.json",
-                scopes=scopes
-            )
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         client = gspread.authorize(creds)
-        sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
-        return sheet
-    except Exception as exc:
-        logger.error(f"Erro ao autenticar ou abrir planilha no Google Sheets: {exc}")
-        raise
+        sheet_id = os.environ.get("SPREADSHEET_ID")
+        return client.open_by_key(sheet_id).sheet1
+    except Exception as e:
+        raise RuntimeError(f"Falha ao conectar ao Google Sheets: {str(e)}")
 
-def salvar_linha_planilha(dados: Dict[str, Any]) -> bool:
-    """
-    Insere uma nova linha na planilha com as colunas:
-    [Data, Estabelecimento, Valor, Categoria, Forma de Pagamento, Observações]
-    """
-    try:
-        sheet = obter_planilha_google()
-        nova_linha = [
-            dados.get("data", datetime.now().strftime("%d/%m/%Y")),
-            dados.get("estabelecimento", "Não identificado"),
-            dados.get("valor", "0,00"),
-            dados.get("categoria", "Outros"),
-            dados.get("forma_pagamento", "Não informada"),
-            dados.get("observacoes", "")
+# 2. Função para enviar mensagem com botões de seleção de categoria (Inline Keyboard)
+def enviar_mensagem_com_botoes(chat_id: int, texto: str, estado_id: str):
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    
+    # IMPORTANTE: Usamos estado_id (file_unique_id) ou file_id[:20] porque o file_id completo
+    # do Telegram tem ~85 caracteres e estoura o limite de 64 bytes do callback_data!
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {"text": "Despesa", "callback_data": f"cat|Despesa|{estado_id}"},
+                {"text": "Adiantamento", "callback_data": f"cat|Adiantamento|{estado_id}"}
+            ],
+            [
+                {"text": "Manutenção", "callback_data": f"cat|Manutenção|{estado_id}"},
+                {"text": "Combustível", "callback_data": f"cat|Combustível|{estado_id}"}
+            ],
+            [
+                {"text": "Material", "callback_data": f"cat|Material|{estado_id}"},
+                {"text": "Ferramentas", "callback_data": f"cat|Ferramentas|{estado_id}"}
+            ],
+            [
+                {"text": "Outros", "callback_data": f"cat|Outros|{estado_id}"}
+            ]
         ]
-        sheet.append_row(nova_linha, value_input_option="USER_ENTERED")
-        logger.info(f"Registro salvo no Google Sheets com sucesso: {nova_linha}")
-        return True
-    except Exception as exc:
-        logger.error(f"Falha ao gravar registro no Google Sheets: {exc}")
-        return False
-
-# =====================================================================
-# 4. INTEGRAÇÃO COM A API DO OCR.SPACE
-# =====================================================================
-async def processar_ocr_space_base64(
-    conteudo_bytes: bytes,
-    mime_type: str = "image/jpeg",
-    ocr_engine: str = OCR_ENGINE_DEFAULT
-) -> Optional[str]:
-    """
-    Envia a imagem ou PDF codificado em Base64 (com prefixo obrigatório) para
-    o endpoint https://api.ocr.space/parse/image respeitando os limites do plano gratuito.
-    """
-    if len(conteudo_bytes) > 1024 * 1024:
-        logger.warning("Arquivo excede o limite de 1 MB do OCR.space gratuito.")
-        return None
-
-    b64_str = base64.b64encode(conteudo_bytes).decode("utf-8")
-    # Prefixo obrigatório exigido pelo OCR.space para Base64
-    base64_image_payload = f"data:{mime_type};base64,{b64_str}"
-
-    headers = {
-        "apikey": OCR_SPACE_API_KEY
     }
-
+    
     payload = {
-        "base64Image": base64_image_payload,
+        "chat_id": chat_id,
+        "text": texto,
+        "parse_mode": "Markdown",
+        "reply_markup": reply_markup
+    }
+    try:
+        res = requests.post(url, json=payload, timeout=15)
+        res.raise_for_status()
+    except Exception as e:
+        print(f"Erro ao enviar mensagem com botões ao Telegram: {e}")
+
+# 3. Função para enviar mensagens de texto simples
+def enviar_mensagem_telegram(chat_id: int, texto: str):
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    try:
+        requests.post(
+            url,
+            json={"chat_id": chat_id, "text": texto, "parse_mode": "Markdown"},
+            timeout=15
+        )
+    except Exception as e:
+        print(f"Erro ao enviar mensagem simples ao Telegram: {e}")
+
+# 4. Função para responder à interatividade do botão (callback query)
+def responder_callback_query(callback_query_id: str, texto: str):
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    url = f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery"
+    try:
+        requests.post(
+            url,
+            json={"callback_query_id": callback_query_id, "text": texto},
+            timeout=10
+        )
+    except Exception as e:
+        print(f"Erro ao responder callback_query: {e}")
+
+# 5. Função para baixar imagem ou PDF recebido no Telegram
+def baixar_arquivo_telegram(file_id: str) -> bytes:
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    try:
+        res = requests.get(
+            f"https://api.telegram.org/bot{bot_token}/getFile",
+            params={"file_id": file_id},
+            timeout=15
+        ).json()
+        file_path = res["result"]["file_path"]
+        file_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
+        response = requests.get(file_url, timeout=30)
+        response.raise_for_status()
+        return response.content
+    except Exception as e:
+        raise RuntimeError(f"Falha ao baixar arquivo do Telegram: {str(e)}")
+
+# 6. Função para realizar OCR via OCR.space API (Com chave no Header e Base64/Multipart)
+def processar_ocr_space(
+    arquivo_bytes: bytes,
+    mime_type: str = "image/jpeg",
+    usar_base64: bool = True
+) -> str:
+    api_key = os.environ.get("OCR_SPACE_API_KEY", "")
+    
+    # Validação do limite de 1 MB (1.024 KB) do plano gratuito do OCR.space
+    if len(arquivo_bytes) > 1024 * 1024:
+        raise ValueError("O arquivo excede o limite de 1 MB do plano gratuito do OCR.space.")
+
+    # BOA PRÁTICA: Envio da chave de API no header HTTP 'apikey'
+    headers = {
+        "apikey": api_key
+    }
+    
+    payload = {
         "language": "por",
-        "OCREngine": ocr_engine,  # "2" ou "3" para recibos e tabelas
+        "OCREngine": "2",
         "isTable": "true",
-        "scale": "true",
-        "detectOrientation": "true"
+        "scale": "true"
     }
 
     try:
-        async with httpx.AsyncClient(timeout=45.0) as client:
-            response = await client.post(
-                OCR_SPACE_ENDPOINT,
+        if usar_base64:
+            # Prefixo obrigatório para envio em Base64 (ex: data:image/jpeg;base64,...)
+            b64_str = base64.b64encode(arquivo_bytes).decode("utf-8")
+            payload["base64Image"] = f"data:{mime_type};base64,{b64_str}"
+            response = requests.post(
+                "https://api.ocr.space/parse/image",
                 headers=headers,
-                data=payload
+                data=payload,
+                timeout=45
             )
-            response.raise_for_status()
-            resultado = response.json()
-
-            if resultado.get("IsErroredOnProcessing"):
-                erros = resultado.get("ErrorMessage", ["Erro desconhecido no OCR.space"])
-                logger.error(f"OCR.space retornou erro de processamento: {erros}")
-                return None
-
-            parsed_results = resultado.get("ParsedResults", [])
-            if not parsed_results:
-                return ""
-
-            texto_completo = "\\n".join(
-                bloco.get("ParsedText", "") for bloco in parsed_results
+        else:
+            ext = "pdf" if "pdf" in mime_type else "jpg"
+            files = {"file": (f"receipt.{ext}", arquivo_bytes, mime_type)}
+            response = requests.post(
+                "https://api.ocr.space/parse/image",
+                headers=headers,
+                data=payload,
+                files=files,
+                timeout=45
             )
-            return texto_completo.strip()
 
-    except httpx.TimeoutException:
-        logger.error("Timeout ao aguardar resposta da API do OCR.space.")
-        return None
-    except httpx.HTTPError as exc:
-        logger.error(f"Erro HTTP na chamada ao OCR.space: {exc}")
-        return None
-    except Exception as exc:
-        logger.error(f"Erro inesperado ao consultar OCR.space: {exc}")
-        return None
+        response.raise_for_status()
+        result = response.json()
+        
+        if result.get("IsErroredOnProcessing"):
+            erro_msg = result.get("ErrorMessage", ["Erro desconhecido no OCR"])
+            raise Exception(erro_msg[0] if isinstance(erro_msg, list) else str(erro_msg))
+        
+        parsed_results = result.get("ParsedResults", [])
+        if not parsed_results:
+            return ""
+        return "\\n".join(p.get("ParsedText", "") for p in parsed_results)
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Erro na requisição ao OCR.space: {str(e)}")
 
-# =====================================================================
-# 5. PARSER INTELIGENTE DE RECIBOS E NOTAS FISCAIS (REGEX)
-# =====================================================================
-def extrair_dados_recibo(texto_ocr: str, legenda_usuario: str = "") -> Dict[str, str]:
-    linhas = [linha.strip() for linha in texto_ocr.splitlines() if linha.strip()]
+# 7. Lógica para extrair dados estruturados a partir do texto lido
+def extrair_dados_recibo(texto: str):
+    linhas = [l.strip() for l in texto.split("\\n") if l.strip()]
+    estabelecimento = linhas[0] if linhas else "Desconhecido"
+    
+    match_data = re.search(r"\\b\\d{2}/\\d{2}/\\d{2,4}\\b", texto)
+    data = match_data.group(0) if match_data else datetime.now().strftime("%d/%m/%Y")
+    
+    # Suporta valores com separador de milhar (ex: 1.120,00 ou 461,90)
+    valores = re.findall(r"\\b(?:\\d{1,3}(?:\\.\\d{3})*|\\d+)[\\.,]\\d{2}\\b", texto)
+    valor = 0.0
+    if valores:
+        try:
+            ultimo = valores[-1]
+            if "," in ultimo and "." in ultimo:
+                ultimo = ultimo.replace(".", "").replace(",", ".")
+            else:
+                ultimo = ultimo.replace(",", ".")
+            valor = float(ultimo)
+        except ValueError:
+            valor = 0.0
 
-    termos_ignorar = ("CUPOM FISCAL", "NOTA FISCAL", "DANFE", "EXTRATO", "COMPROVANTE", "CNPJ")
-    estabelecimento = "Não identificado"
-    for linha in linhas[:6]:
-        linha_upper = linha.upper()
-        if len(linha) > 3 and not any(termo in linha_upper for termo in termos_ignorar):
-            estabelecimento = linha[:60]
-            break
-
-    padrao_data = re.compile(r"\\b(\\d{2}/\\d{2}/(?:20\\d{2}|\\d{2}))\\b")
-    match_data = padrao_data.search(texto_ocr)
-    data_extraida = match_data.group(1) if match_data else datetime.now().strftime("%d/%m/%Y")
-
-    valor_extraido = "0,00"
-    padrao_total_especifico = re.compile(
-        r"(?:TOTAL\\s*(?:A\\s*PAGAR|R\\$|GERAL|LIQUIDO)?|VALOR\\s*(?:TOTAL|PAGO)?)\\s*[:R\\$\\s]*(\\d{1,3}(?:\\.\\d{3})*,\\d{2}|\\d+,\\d{2})",
-        re.IGNORECASE
-    )
-    matches_total = padrao_total_especifico.findall(texto_ocr)
-    if matches_total:
-        valor_extraido = matches_total[-1]
-    else:
-        todos_valores = re.findall(r"\\b(\\d{1,3}(?:\\.\\d{3})*,\\d{2})\\b", texto_ocr)
-        if todos_valores:
-            valor_extraido = todos_valores[-1]
-
-    texto_upper = texto_ocr.upper()
+    texto_upper = texto.upper()
     if "PIX" in texto_upper:
-        forma_pagamento = "PIX"
+        pagamento = "PIX"
     elif "CREDITO" in texto_upper or "CRÉDITO" in texto_upper:
-        forma_pagamento = "Cartão de Crédito"
+        pagamento = "Cartão de Crédito"
     elif "DEBITO" in texto_upper or "DÉBITO" in texto_upper:
-        forma_pagamento = "Cartão de Débito"
-    elif "DINHEIRO" in texto_upper or "ESPÉCIE" in texto_upper:
-        forma_pagamento = "Dinheiro"
-    elif "BOLETO" in texto_upper:
-        forma_pagamento = "Boleto"
+        pagamento = "Cartão de Débito"
+    elif "DINHEIRO" in texto_upper:
+        pagamento = "Dinheiro"
     else:
-        forma_pagamento = "Não informada"
-
+        pagamento = "Outros"
+            
     return {
-        "data": data_extraida,
+        "data": data,
         "estabelecimento": estabelecimento,
-        "valor": valor_extraido,
-        "forma_pagamento": forma_pagamento,
-        "observacoes": legenda_usuario.strip() or "Sem observações",
-        "texto_bruto": texto_ocr
+        "valor": valor,
+        "pagamento": pagamento
     }
-
-# =====================================================================
-# 6. AUXILIARES DO TELEGRAM E ROTAS DE WEBHOOK
-# =====================================================================
-def montar_teclado_categorias(token_estado: str) -> Dict[str, Any]:
-    botoes = []
-    linha_atual = []
-    for cat in CATEGORIAS_GASTO:
-        callback_str = f"cat|{token_estado}|{cat}"
-        linha_atual.append({"text": cat, "callback_data": callback_str})
-        if len(linha_atual) == 2:
-            botoes.append(linha_atual)
-            linha_atual = []
-    if linha_atual:
-        botoes.append(linha_atual)
-
-    botoes.append([{"text": "Cancelar Registro", "callback_data": f"cancel|{token_estado}"}])
-    return {"inline_keyboard": botoes}
 
 @app.post("/webhook")
-async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
+async def telegram_webhook(request: Request):
     try:
-        update = await request.json()
+        data = await request.json()
     except Exception:
-        raise HTTPException(status_code=400, detail="Payload JSON inválido")
-
-    if "callback_query" in update:
-        cb = update["callback_query"]
-        cb_id = cb["id"]
-        data_str = cb.get("data", "")
-        msg = cb.get("message", {})
-        chat_id = msg.get("chat", {}).get("id")
-        message_id = msg.get("message_id")
-
-        if data_str.startswith("cat|"):
-            _, token_estado, categoria_escolhida = data_str.split("|", 2)
-            dados_pendentes = DADOS_TEMPORARIOS.pop(token_estado, None)
-            if dados_pendentes:
-                dados_pendentes["categoria"] = categoria_escolhida
-                salvar_linha_planilha(dados_pendentes)
-        return {"ok": True}
-
-    return {"ok": True}
+        return {"status": "invalid_json"}
+    
+    # 1. Trata o recebimento de foto ou documento (PDF) no Telegram
+    if "message" in data and ("photo" in data["message"] or "document" in data["message"]):
+        message = data["message"]
+        chat_id = message["chat"]["id"]
+        caption = message.get("caption", "")
+        
+        if "photo" in message:
+            melhor_foto = message["photo"][-1]
+            file_id = melhor_foto["file_id"]
+            estado_id = melhor_foto.get("file_unique_id", file_id[:20])
+            mime_type = "image/jpeg"
+        else:
+            doc = message["document"]
+            file_id = doc["file_id"]
+            estado_id = doc.get("file_unique_id", file_id[:20])
+            mime_type = doc.get("mime_type", "application/pdf")
+        
+        try:
+            arquivo_bytes = baixar_arquivo_telegram(file_id)
+            texto_extraido = processar_ocr_space(arquivo_bytes, mime_type=mime_type)
+            dados = extrair_dados_recibo(texto_extraido)
+            dados["observacoes"] = caption
+            
+            # Salva dados extraídos temporariamente usando o estado_id curto (file_unique_id)
+            DADOS_TEMPORARIOS[estado_id] = dados
+            
+            obs_text = f"\\n• *Observação:* {caption}" if caption else ""
+            msg_prompt = (
+                f"🧾 *Leitura do Recibo Concluída!*\\n\\n"
+                f"• *Local:* {dados.get('estabelecimento')}\\n"
+                f"• *Data:* {dados.get('data')}\\n"
+                f"• *Valor:* R$ {dados.get('valor'):.2f}\\n"
+                f"• *Pagamento:* {dados.get('pagamento')}"
+                f"{obs_text}\\n\\n"
+                f"Por favor, selecione a *categoria* do gasto abaixo:"
+            )
+            enviar_mensagem_com_botoes(chat_id, msg_prompt, estado_id)
+            
+        except Exception as e:
+            enviar_mensagem_telegram(chat_id, f"⚠️ Erro ao processar a nota fiscal: {str(e)}")
+            
+    # 2. Trata a seleção de botões inline (callback_query)
+    elif "callback_query" in data:
+        callback = data["callback_query"]
+        callback_id = callback["id"]
+        chat_id = callback["message"]["chat"]["id"]
+        callback_data = callback.get("data", "")
+        
+        if callback_data.startswith("cat|"):
+            _, categoria, estado_id = callback_data.split("|", 2)
+            
+            # Recupera dados temporários
+            dados = DADOS_TEMPORARIOS.pop(estado_id, None)
+            
+            if dados:
+                dados["categoria"] = categoria
+                
+                try:
+                    planilha = obter_planilha()
+                    linha = [
+                        dados.get("data", ""),
+                        dados.get("estabelecimento", ""),
+                        dados.get("valor", 0.0),
+                        dados.get("categoria", ""),
+                        dados.get("pagamento", ""),
+                        dados.get("observacoes", "")
+                    ]
+                    planilha.append_row(linha, value_input_option="USER_ENTERED")
+                    
+                    responder_callback_query(callback_id, f"Categoria '{categoria}' selecionada!")
+                    
+                    obs_text = f"\\n• *Observação:* {dados.get('observacoes')}" if dados.get('observacoes') else ""
+                    msg_sucesso = (
+                        f"✅ *Gasto Registrado no Google Sheets!*\\n\\n"
+                        f"• *Local:* {dados.get('estabelecimento')}\\n"
+                        f"• *Data:* {dados.get('data')}\\n"
+                        f"• *Valor:* R$ {dados.get('valor'):.2f}\\n"
+                        f"• *Categoria:* {dados.get('categoria')}\\n"
+                        f"• *Pagamento:* {dados.get('pagamento')}"
+                        f"{obs_text}"
+                    )
+                    enviar_mensagem_telegram(chat_id, msg_sucesso)
+                except Exception as e:
+                    # Restaura em memória para permitir nova tentativa se o Google Sheets falhar
+                    DADOS_TEMPORARIOS[estado_id] = dados
+                    enviar_mensagem_telegram(chat_id, f"⚠️ Erro ao salvar na planilha: {str(e)}")
+            else:
+                responder_callback_query(callback_id, "Dados expirados ou já processados.")
+                enviar_mensagem_telegram(chat_id, "⚠️ Os dados deste recibo expiraram ou já foram salvos.")
+                
+    return {"status": "ok"}
 `;
 
-export const REQUIREMENTS_CODE = `fastapi==0.115.6
-uvicorn[standard]==0.34.0
-httpx==0.28.1
-gspread==6.1.4
-google-auth==2.37.0
-python-multipart==0.0.20
-pydantic==2.10.4`;
+export const REQUIREMENTS_CODE = `fastapi
+uvicorn
+python-telegram-bot
+gspread
+google-auth
+requests`;
 
-export const PROCFILE_CODE = `web: uvicorn main:app --host 0.0.0.0 --port \${PORT:-10000} --workers 1`;
+export const PROCFILE_CODE = `web: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1`;
 
 export const ENV_EXAMPLE_CODE = `# Token gerado pelo @BotFather no Telegram
 TELEGRAM_BOT_TOKEN="1234567890:AAH_seu_token_do_botfather_aqui"
@@ -422,13 +458,8 @@ TELEGRAM_BOT_TOKEN="1234567890:AAH_seu_token_do_botfather_aqui"
 # Chave da API OCR.space (enviada no header apikey)
 OCR_SPACE_API_KEY="K8123456788957"
 
-# Engine OCR.space: "2" (recibos/caracteres especiais) ou "3" (tabelas densas)
-OCR_ENGINE_DEFAULT="2"
-
-# ID da planilha extraído da URL do Google Sheets:
-# https://docs.google.com/spreadsheets/d/SEU_GOOGLE_SHEET_ID/edit
-GOOGLE_SHEET_ID="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
+# ID da planilha extraído da URL do Google Sheets (SPREADSHEET_ID)
+SPREADSHEET_ID="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
 
 # Conteúdo completo do JSON da Service Account em uma única linha
-# Importante: compartilhe a planilha com o client_email desta conta como Editor!
 GOOGLE_CREDENTIALS_JSON='{"type":"service_account","project_id":"...","private_key":"...","client_email":"bot-financeiro@projeto.iam.gserviceaccount.com"}'`;
