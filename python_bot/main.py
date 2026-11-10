@@ -15,19 +15,66 @@ app = FastAPI(title="Meu Bot de Finanças — Telegram + OCR.space + Google Shee
 DADOS_TEMPORARIOS = {}
 
 
-# 1. Configuração do Google Sheets com tratamento de erros
+# 1. Configuração do Google Sheets com tratamento de erros e suporte robusto a credenciais
 def obter_planilha():
+    creds_raw = (
+        os.environ.get("GOOGLE_CREDENTIALS_JSON")
+        or os.environ.get("GOOGLE_CREDENTIALS")
+        or ""
+    ).strip()
+
+    if not creds_raw:
+        raise RuntimeError(
+            "A variável de ambiente GOOGLE_CREDENTIALS_JSON está vazia ou não foi configurada no painel Environment do Render."
+        )
+
+    # Remove aspas simples ou duplas externas caso tenham sido coladas acidentalmente no Render
+    if (creds_raw.startswith("'") and creds_raw.endswith("'")) or (
+        creds_raw.startswith('"') and creds_raw.endswith('"')
+    ):
+        creds_raw = creds_raw[1:-1].strip()
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+
     try:
-        creds_raw = os.environ.get("GOOGLE_CREDENTIALS_JSON", "{}")
-        creds_dict = json.loads(creds_raw)
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive"
-        ]
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        # Caso 1: É um caminho para arquivo JSON (ex: Secret Files no Render ou arquivo local)
+        if os.path.isfile(creds_raw):
+            creds = Credentials.from_service_account_file(creds_raw, scopes=scopes)
+        else:
+            # Caso 2: Caso o usuário tenha codificado o JSON em Base64
+            if not creds_raw.startswith("{"):
+                try:
+                    creds_raw = base64.b64decode(creds_raw).decode("utf-8").strip()
+                except Exception:
+                    pass
+
+            creds_dict = json.loads(creds_raw)
+            # Garante que quebras de linha escapadas na private_key funcionem corretamente
+            if "private_key" in creds_dict and "\\n" in creds_dict["private_key"]:
+                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+
+            creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+
         client = gspread.authorize(creds)
-        sheet_id = os.environ.get("SPREADSHEET_ID")
+        sheet_id = (
+            os.environ.get("SPREADSHEET_ID")
+            or os.environ.get("GOOGLE_SHEET_ID")
+            or ""
+        ).strip()
+
+        if not sheet_id:
+            raise RuntimeError(
+                "A variável de ambiente SPREADSHEET_ID não foi configurada no Render."
+            )
+
         return client.open_by_key(sheet_id).sheet1
+    except json.JSONDecodeError as je:
+        raise RuntimeError(
+            f"O conteúdo de GOOGLE_CREDENTIALS_JSON não é um JSON válido (verifique se colou o arquivo inteiro começando com '{{'): {str(je)}"
+        )
     except Exception as e:
         raise RuntimeError(f"Falha ao conectar ao Google Sheets: {str(e)}")
 
