@@ -1,9 +1,5 @@
 import React, { useState, useMemo } from 'react';
 import {
-  FileCode2,
-  Play,
-  Table2,
-  BookOpen,
   Copy,
   Check,
   Download,
@@ -11,18 +7,18 @@ import {
   Upload,
   Trash2,
   RefreshCw,
-  AlertTriangle,
   CheckCircle2,
   Terminal,
   Search,
-  FileText,
   Sliders,
+  ExternalLink,
 } from 'lucide-react';
 import {
   RECEIPT_SAMPLES,
   CATEGORIAS_GASTO,
   INITIAL_SHEET_ROWS,
   PYTHON_MAIN_CODE,
+  SHEETS_SERVICE_CODE,
   REQUIREMENTS_CODE,
   PROCFILE_CODE,
   ENV_EXAMPLE_CODE,
@@ -32,7 +28,7 @@ import {
 import { extrairDadosReciboTS, ParsedReceiptData } from './utils/receiptParser';
 
 type ActiveSection = 'simulador' | 'codigo' | 'planilha' | 'arquitetura';
-type CodeTab = 'main.py' | 'requirements.txt' | 'Procfile' | '.env.example';
+type CodeTab = 'main.py' | 'sheets_service.py' | 'requirements.txt' | 'Procfile' | '.env.example';
 
 interface PendingTelegramState extends ParsedReceiptData {
   token: string;
@@ -41,6 +37,7 @@ interface PendingTelegramState extends ParsedReceiptData {
   sizeKb: number;
   ocrEngine: '2' | '3';
   responsavel: string;
+  file_url: string;
 }
 
 interface ChatMessage {
@@ -55,13 +52,15 @@ interface ChatMessage {
   text: string;
   pendingToken?: string;
   resolvedCategory?: CategoriaGasto;
+  resolvedFormula?: string;
+  duplicateWarning?: boolean;
   cancelled?: boolean;
   isError?: boolean;
 }
 
 export default function App() {
   const [activeSection, setActiveSection] = useState<ActiveSection>('simulador');
-  const [activeCodeTab, setActiveCodeTab] = useState<CodeTab>('main.py');
+  const [activeCodeTab, setActiveCodeTab] = useState<CodeTab>('sheets_service.py');
   const [copiedFile, setCopiedFile] = useState<string | null>(null);
 
   // Simulador OCR.space + Telegram State
@@ -84,12 +83,14 @@ export default function App() {
       sizeKb: 384,
       ocrEngine: '2',
       data: '10/11/2026',
-      aba_mes: 'Novembro/2026',
+      aba_mes: '11-2026',
       estabelecimento: 'AUTO POSTO AVENIDA LTDA',
+      tipo_documento: 'Cupom Fiscal',
       valor: '461,90',
       forma_pagamento: 'Cartão de Débito',
       observacoes: 'Abastecimento frota caminhão placa ABC-1234',
       responsavel: 'João Oliveira (@joao_frota)',
+      file_url: 'https://api.telegram.org/file/bot<TOKEN>/photos/file_84920_posto_avenida.jpg',
       texto_bruto: RECEIPT_SAMPLES[0].rawText,
     },
   });
@@ -100,7 +101,7 @@ export default function App() {
       id: 'msg-init-1',
       sender: 'user',
       timestamp: '11:35:10',
-      title: 'Cupom Fiscal — Posto Avenida (Novembro/2026)',
+      title: 'Cupom Fiscal — Posto Avenida (11-2026)',
       caption: 'Abastecimento frota caminhão placa ABC-1234',
       responsavel: 'João Oliveira (@joao_frota)',
       fileType: 'image/jpeg',
@@ -111,12 +112,12 @@ export default function App() {
       id: 'msg-init-2',
       sender: 'bot',
       timestamp: '11:35:12',
-      text: 'Recibo processado via OCR.space (Engine 2 · isTable=True). Escolha a categoria abaixo para gravar na aba do mês:',
+      text: 'Recibo processado via OCR.space (Engine 2 · isTable=True) e URL oficial do Telegram capturada via getFile. Escolha a categoria abaixo para gravar na aba do mês:',
       pendingToken: 'a94f21c8',
     },
   ]);
 
-  // Linhas salvas no Google Sheets (separadas por abas mensais)
+  // Linhas salvas no Google Sheets (separadas por abas mensais MM-AAAA)
   const [sheetRows, setSheetRows] = useState<SheetRow[]>(INITIAL_SHEET_ROWS);
   const [activeMonthTab, setActiveMonthTab] = useState<string>('Todas as Abas');
   const [sheetFilter, setSheetFilter] = useState<string>('Todas');
@@ -185,6 +186,9 @@ export default function App() {
 
       const parsed = extrairDadosReciboTS(sample.rawText, customCaption);
       const token = Math.random().toString(16).substring(2, 10);
+      const ext = sample.type === 'application/pdf' ? 'pdf' : 'jpg';
+      const folder = sample.type === 'application/pdf' ? 'documents' : 'photos';
+      const fileUrl = `https://api.telegram.org/file/bot<TOKEN>/${folder}/file_${token}_${sample.id}.${ext}`;
 
       const newState: PendingTelegramState = {
         ...parsed,
@@ -194,6 +198,7 @@ export default function App() {
         sizeKb: sample.sizeKb,
         ocrEngine: selectedEngine,
         responsavel: remetente,
+        file_url: fileUrl,
       };
 
       setDadosTemporarios((prev) => ({
@@ -292,7 +297,6 @@ export default function App() {
           return;
         }
       } else {
-        // Simula retorno OCR estruturado para o arquivo enviado caso o usuário não tenha inserido chave real
         ocrText = `${file.name.replace(/\.[^/.]+$/, '').toUpperCase()} COMERCIO LTDA\nDATA: ${new Date().toLocaleDateString(
           'pt-BR'
         )}\nVALOR TOTAL R$ 285,00\nPAGAMENTO: PIX`;
@@ -304,6 +308,8 @@ export default function App() {
         customCaption || 'Recibo enviado via upload local'
       );
       const token = Math.random().toString(16).substring(2, 10);
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const fileUrl = `https://api.telegram.org/file/bot<TOKEN>/photos/file_${token}_${safeName}`;
 
       setDadosTemporarios((prev) => ({
         ...prev,
@@ -315,6 +321,7 @@ export default function App() {
           sizeKb,
           ocrEngine: selectedEngine,
           responsavel: remetente,
+          file_url: fileUrl,
         },
       }));
 
@@ -336,20 +343,36 @@ export default function App() {
     const pending = dadosTemporarios[token];
     if (!pending) return;
 
-    const newRow: SheetRow = {
-      id: `row-${Date.now()}`,
-      data: pending.data,
-      aba_mes: pending.aba_mes,
-      estabelecimento: pending.estabelecimento,
-      valor: pending.valor,
-      categoria,
-      forma_pagamento: pending.forma_pagamento,
-      observacoes: pending.observacoes,
-      responsavel: pending.responsavel,
-      token_origem: token,
-    };
+    const formulaHyperlink = `=HYPERLINK("${pending.file_url}"; "Ver Comprovante")`;
 
-    setSheetRows((prev) => [newRow, ...prev]);
+    // Verifica duplicidade simples (mesma Data, Estabelecimento e Valor na mesma aba)
+    const isDuplicate = sheetRows.some(
+      (r) =>
+        r.aba_mes === pending.aba_mes &&
+        r.data === pending.data &&
+        r.estabelecimento === pending.estabelecimento &&
+        r.valor === pending.valor
+    );
+
+    if (!isDuplicate) {
+      const newRow: SheetRow = {
+        id: `row-${Date.now()}`,
+        data: pending.data,
+        aba_mes: pending.aba_mes,
+        estabelecimento: pending.estabelecimento,
+        tipo_documento: pending.tipo_documento,
+        valor: pending.valor,
+        categoria,
+        forma_pagamento: pending.forma_pagamento,
+        observacoes: pending.observacoes,
+        responsavel: pending.responsavel,
+        file_url: pending.file_url,
+        formula_hyperlink: formulaHyperlink,
+        token_origem: token,
+      };
+
+      setSheetRows((prev) => [newRow, ...prev]);
+    }
 
     // Remove do dicionário DADOS_TEMPORARIOS (pop)
     setDadosTemporarios((prev) => {
@@ -365,6 +388,8 @@ export default function App() {
           ? {
               ...m,
               resolvedCategory: categoria,
+              resolvedFormula: formulaHyperlink,
+              duplicateWarning: isDuplicate,
             }
           : m
       )
@@ -410,24 +435,28 @@ export default function App() {
 
   const handleExportCsv = () => {
     const headers = [
-      'Aba (Mes/Ano)',
-      'Data',
-      'Estabelecimento',
-      'Valor (R$)',
-      'Categoria',
-      'Forma de Pagamento',
-      'Observacoes',
-      'Responsavel',
+      'Aba (MM-AAAA)',
+      'Date',
+      'Establishment',
+      'Doc Type',
+      'Category',
+      'Payment',
+      'Value',
+      'Responsible',
+      'Receipt Link (Formula)',
+      'Obs',
     ];
     const rows = filteredSheetRows.map((r) => [
       r.aba_mes,
       r.data,
       `"${r.estabelecimento.replace(/"/g, '""')}"`,
-      `"${r.valor}"`,
+      r.tipo_documento,
       r.categoria,
       r.forma_pagamento,
-      `"${r.observacoes.replace(/"/g, '""')}"`,
+      `"${r.valor}"`,
       `"${r.responsavel.replace(/"/g, '""')}"`,
+      `"${r.formula_hyperlink.replace(/"/g, '""')}"`,
+      `"${r.observacoes.replace(/"/g, '""')}"`,
     ]);
     const csvContent = [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
     handleDownloadFile('planilha_gastos_telegram_ocr.csv', csvContent, 'text/csv');
@@ -444,6 +473,7 @@ export default function App() {
         row.observacoes.toLowerCase().includes(sheetSearch.toLowerCase()) ||
         row.responsavel.toLowerCase().includes(sheetSearch.toLowerCase()) ||
         row.aba_mes.toLowerCase().includes(sheetSearch.toLowerCase()) ||
+        row.tipo_documento.toLowerCase().includes(sheetSearch.toLowerCase()) ||
         row.forma_pagamento.toLowerCase().includes(sheetSearch.toLowerCase());
       return matchesMonth && matchesCat && matchesQuery;
     });
@@ -460,6 +490,8 @@ export default function App() {
     switch (activeCodeTab) {
       case 'main.py':
         return PYTHON_MAIN_CODE;
+      case 'sheets_service.py':
+        return SHEETS_SERVICE_CODE;
       case 'requirements.txt':
         return REQUIREMENTS_CODE;
       case 'Procfile':
@@ -487,27 +519,27 @@ export default function App() {
         <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
           <button
             onClick={() => setActiveSection('simulador')}
-            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 ${
+            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 cursor-pointer ${
               activeSection === 'simulador'
                 ? 'border-blue-600 text-slate-900 font-semibold'
                 : 'border-transparent hover:text-slate-900'
             }`}
           >
-            Simulador Webhook & OCR
+            Simulador Webhook &amp; OCR
           </button>
           <button
             onClick={() => setActiveSection('codigo')}
-            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 ${
+            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 cursor-pointer ${
               activeSection === 'codigo'
                 ? 'border-blue-600 text-slate-900 font-semibold'
                 : 'border-transparent hover:text-slate-900'
             }`}
           >
-            Código Python (Render)
+            Código Python (main.py + sheets_service.py)
           </button>
           <button
             onClick={() => setActiveSection('planilha')}
-            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 ${
+            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 cursor-pointer ${
               activeSection === 'planilha'
                 ? 'border-blue-600 text-slate-900 font-semibold'
                 : 'border-transparent hover:text-slate-900'
@@ -517,23 +549,32 @@ export default function App() {
           </button>
           <button
             onClick={() => setActiveSection('arquitetura')}
-            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 ${
+            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 cursor-pointer ${
               activeSection === 'arquitetura'
                 ? 'border-blue-600 text-slate-900 font-semibold'
                 : 'border-transparent hover:text-slate-900'
             }`}
           >
-            Boas Práticas & Erros
+            Boas Práticas &amp; Erros
           </button>
         </nav>
 
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-2.5 shrink-0">
           <button
-            onClick={() => handleDownloadFile('main.py', PYTHON_MAIN_CODE, 'text/x-python')}
-            className="px-4 py-2 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors whitespace-nowrap shrink-0 flex items-center gap-2 cursor-pointer"
+            onClick={() =>
+              handleDownloadFile('sheets_service.py', SHEETS_SERVICE_CODE, 'text/x-python')
+            }
+            className="px-3.5 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
           >
             <Download className="w-3.5 h-3.5" />
-            Baixar main.py
+            sheets_service.py
+          </button>
+          <button
+            onClick={() => handleDownloadFile('main.py', PYTHON_MAIN_CODE, 'text/x-python')}
+            className="px-3.5 py-2 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+          >
+            <Download className="w-3.5 h-3.5" />
+            main.py
           </button>
         </div>
       </header>
@@ -588,7 +629,7 @@ export default function App() {
         <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-6 pb-8 border-b border-slate-200">
           <div>
             <p className="text-xs font-medium text-slate-500 mb-2">
-              FastAPI + Uvicorn · API OCR.space (OCREngine 2/3) · Telegram Inline Keyboard · Google Sheets (gspread)
+              FastAPI + Uvicorn · API OCR.space (OCREngine 2/3) · Link Direto Telegram (=HYPERLINK) · Google Sheets (Abas MM-AAAA)
             </p>
             <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 max-w-3xl">
               Arquitetura e Bancada de Testes para Bot Financeiro no Telegram
@@ -628,7 +669,7 @@ export default function App() {
                 <div className="flex items-center justify-between border-b border-slate-100 pb-4">
                   <div>
                     <h2 className="text-base font-bold text-slate-900">
-                      1. Entrada de Recibo & Parâmetros OCR.space
+                      1. Entrada de Recibo &amp; Parâmetros OCR.space
                     </h2>
                     <p className="text-xs text-slate-500 mt-0.5">
                       POST https://api.ocr.space/parse/image
@@ -658,7 +699,7 @@ export default function App() {
                 {/* Remetente no Telegram (Coluna Responsável) */}
                 <div className="space-y-2">
                   <label className="block text-xs font-semibold text-slate-700">
-                    Quem enviou no Telegram (message.from → Coluna Responsável)
+                    Quem enviou no Telegram (message.from → Coluna Responsible)
                   </label>
                   <input
                     type="text"
@@ -672,7 +713,7 @@ export default function App() {
                 {/* Legenda enviada junto com a foto no grupo do Telegram */}
                 <div className="space-y-2">
                   <label className="block text-xs font-semibold text-slate-700">
-                    Legenda da Mensagem no Telegram (message.caption → Observações)
+                    Legenda da Mensagem no Telegram (message.caption → Coluna Obs)
                   </label>
                   <input
                     type="text"
@@ -788,7 +829,7 @@ export default function App() {
                       2. Grupo do Telegram — Automação Financeira
                     </h2>
                     <p className="text-xs text-slate-400">
-                      Webhook assíncrono (/webhook) · Clique em uma categoria para persistir no Google Sheets
+                      Webhook assíncrono (/webhook) · Salva link direto =HYPERLINK(&quot;...&quot;; &quot;Ver Comprovante&quot;)
                     </p>
                   </div>
                   <button
@@ -852,38 +893,46 @@ export default function App() {
                             <>
                               <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-1.5 font-mono">
                                 <div>
-                                  <span className="text-slate-500">Responsável:</span>{' '}
+                                  <span className="text-slate-500">Responsible:</span>{' '}
                                   <span className="font-semibold text-blue-700">
                                     {pendingData.responsavel}
                                   </span>
                                 </div>
                                 <div>
-                                  <span className="text-slate-500">Data e Aba do Mês:</span>{' '}
+                                  <span className="text-slate-500">Date &amp; Aba (MM-AAAA):</span>{' '}
                                   <span className="font-semibold text-slate-900 tabular-nums">
                                     {pendingData.data} → Aba [{pendingData.aba_mes}]
                                   </span>
                                 </div>
                                 <div>
-                                  <span className="text-slate-500">Estabelecimento:</span>{' '}
+                                  <span className="text-slate-500">Establishment:</span>{' '}
                                   <span className="font-semibold text-slate-900">
                                     {pendingData.estabelecimento}
                                   </span>
                                 </div>
                                 <div>
-                                  <span className="text-slate-500">Valor Total:</span>{' '}
+                                  <span className="text-slate-500">Doc Type:</span>{' '}
+                                  <span className="font-semibold text-slate-800">
+                                    {pendingData.tipo_documento}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-slate-500">Value:</span>{' '}
                                   <span className="font-semibold text-emerald-700 tabular-nums">
                                     R$ {pendingData.valor}
                                   </span>
                                 </div>
                                 <div>
-                                  <span className="text-slate-500">Pagamento:</span>{' '}
+                                  <span className="text-slate-500">Payment:</span>{' '}
                                   <span className="font-semibold text-slate-900">
                                     {pendingData.forma_pagamento}
                                   </span>
                                 </div>
-                                <div>
-                                  <span className="text-slate-500">Observações:</span>{' '}
-                                  <span className="text-slate-800">{pendingData.observacoes}</span>
+                                <div className="truncate">
+                                  <span className="text-slate-500">Receipt Link:</span>{' '}
+                                  <span className="text-blue-700">
+                                    =HYPERLINK(&quot;{pendingData.file_url}&quot;; &quot;Ver Comprovante&quot;)
+                                  </span>
                                 </div>
                               </div>
 
@@ -921,17 +970,26 @@ export default function App() {
 
                           {/* Estado após escolha de categoria (editMessageText) */}
                           {msg.resolvedCategory && (
-                            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-900 flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                                <span>
-                                  Salvo na aba do mês correspondente na categoria{' '}
-                                  <strong className="font-bold">{msg.resolvedCategory}</strong>!
+                            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-900 space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                                  <span>
+                                    {msg.duplicateWarning
+                                      ? 'Comprovante idêntico já constava na aba (duplicidade evitada) · Categoria '
+                                      : 'Salvo via sheets_service.py na categoria '}
+                                    <strong className="font-bold">{msg.resolvedCategory}</strong>!
+                                  </span>
+                                </div>
+                                <span className="font-mono text-[11px] text-emerald-700">
+                                  USER_ENTERED
                                 </span>
                               </div>
-                              <span className="font-mono text-[11px] text-emerald-700">
-                                Token consumido
-                              </span>
+                              {msg.resolvedFormula && (
+                                <p className="font-mono text-[11px] text-emerald-800 truncate">
+                                  Fórmula gravada: {msg.resolvedFormula}
+                                </p>
+                              )}
                             </div>
                           )}
 
@@ -958,7 +1016,7 @@ export default function App() {
                       3. Estado em Memória (DADOS_TEMPORARIOS)
                     </h3>
                     <p className="text-xs text-slate-500">
-                      Guarda os campos extraídos até que o usuário clique no botão inline
+                      Guarda os campos extraídos e o file_url oficial até o clique no botão inline
                     </p>
                   </div>
                   <Terminal className="w-4 h-4 text-slate-400" />
@@ -971,15 +1029,15 @@ export default function App() {
                 </pre>
               </div>
 
-              {/* Últimos Registros Gravados no Google Sheets (Separados por Aba do Mês) */}
+              {/* Últimos Registros Gravados no Google Sheets (Separados por Aba MM-AAAA) */}
               <div className="lg:col-span-7 bg-white border border-slate-200 rounded-xl p-6 space-y-4">
                 <div className="flex items-center justify-between">
                   <div>
                     <h3 className="text-sm font-bold text-slate-900">
-                      4. Espelho Google Sheets (Abas separadas por Mês do Comprovante)
+                      4. Espelho Google Sheets (Abas MM-AAAA + Coluna Receipt Link)
                     </h3>
                     <p className="text-xs text-slate-500">
-                      Cria ou abre automaticamente a aba Mês/Ano (ex: Novembro/2026, Outubro/2026)
+                      Fórmula =HYPERLINK(&quot;url&quot;; &quot;Ver Comprovante&quot;) inserida com USER_ENTERED
                     </p>
                   </div>
                   <button
@@ -1014,12 +1072,13 @@ export default function App() {
                   <table className="w-full text-left border-collapse">
                     <thead>
                       <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-600">
-                        <th className="py-2.5 px-3">Aba do Mês</th>
-                        <th className="py-2.5 px-3">Data</th>
-                        <th className="py-2.5 px-3">Estabelecimento</th>
-                        <th className="py-2.5 px-3 text-right">Valor (R$)</th>
-                        <th className="py-2.5 px-3">Categoria</th>
-                        <th className="py-2.5 px-3">Responsável</th>
+                        <th className="py-2.5 px-3">Aba</th>
+                        <th className="py-2.5 px-3">Date</th>
+                        <th className="py-2.5 px-3">Establishment</th>
+                        <th className="py-2.5 px-3 text-right">Value</th>
+                        <th className="py-2.5 px-3">Category</th>
+                        <th className="py-2.5 px-3">Responsible</th>
+                        <th className="py-2.5 px-3">Receipt Link</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200 text-xs">
@@ -1031,17 +1090,29 @@ export default function App() {
                           <td className="py-2.5 px-3 font-mono tabular-nums text-slate-600 whitespace-nowrap">
                             {row.data}
                           </td>
-                          <td className="py-2.5 px-3 font-medium text-slate-900 max-w-[150px] truncate">
+                          <td className="py-2.5 px-3 font-medium text-slate-900 max-w-[140px] truncate">
                             {row.estabelecimento}
                           </td>
                           <td className="py-2.5 px-3 font-mono tabular-nums font-semibold text-slate-900 text-right whitespace-nowrap">
-                            {row.valor}
+                            R$ {row.valor}
                           </td>
                           <td className="py-2.5 px-3 text-slate-700 whitespace-nowrap">
                             {row.categoria}
                           </td>
-                          <td className="py-2.5 px-3 font-medium text-blue-700 whitespace-nowrap">
+                          <td className="py-2.5 px-3 font-medium text-slate-800 whitespace-nowrap">
                             {row.responsavel}
+                          </td>
+                          <td className="py-2.5 px-3 whitespace-nowrap">
+                            <a
+                              href={row.file_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              title={row.formula_hyperlink}
+                              className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800 font-semibold underline"
+                            >
+                              Ver Comprovante
+                              <ExternalLink className="w-3 h-3" />
+                            </a>
                           </td>
                         </tr>
                       ))}
@@ -1060,23 +1131,29 @@ export default function App() {
           <div className="mt-8 space-y-6">
             <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
               <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-4 bg-slate-50 border-b border-slate-200">
-                <div className="flex items-center gap-2">
-                  {(['main.py', 'requirements.txt', 'Procfile', '.env.example'] as CodeTab[]).map(
-                    (tab) => (
-                      <button
-                        key={tab}
-                        type="button"
-                        onClick={() => setActiveCodeTab(tab)}
-                        className={`px-3.5 py-2 text-xs font-mono font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                          activeCodeTab === tab
-                            ? 'bg-slate-900 text-white'
-                            : 'text-slate-600 hover:bg-slate-200/70'
-                        }`}
-                      >
-                        {tab}
-                      </button>
-                    )
-                  )}
+                <div className="flex flex-wrap items-center gap-2">
+                  {(
+                    [
+                      'sheets_service.py',
+                      'main.py',
+                      'requirements.txt',
+                      'Procfile',
+                      '.env.example',
+                    ] as CodeTab[]
+                  ).map((tab) => (
+                    <button
+                      key={tab}
+                      type="button"
+                      onClick={() => setActiveCodeTab(tab)}
+                      className={`px-3.5 py-2 text-xs font-mono font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        activeCodeTab === tab
+                          ? 'bg-slate-900 text-white'
+                          : 'text-slate-600 hover:bg-slate-200/70'
+                      }`}
+                    >
+                      {tab}
+                    </button>
+                  ))}
                 </div>
 
                 <div className="flex items-center gap-2">
@@ -1140,7 +1217,7 @@ export default function App() {
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div>
                   <h2 className="text-base font-bold text-slate-900">
-                    Registros Estruturados no Google Sheets (Separados por Aba do Mês)
+                    Registros Estruturados no Google Sheets (Abas MM-AAAA + Link Oficial do Telegram)
                   </h2>
                   <p className="text-xs text-slate-500 mt-0.5">
                     Aba selecionada: <strong className="text-slate-800">{activeMonthTab}</strong> · Total filtrado: R${' '}
@@ -1180,7 +1257,7 @@ export default function App() {
               {/* Seletor de Abas Mensais da Planilha (Worksheet Tabs) */}
               <div className="space-y-1.5">
                 <span className="text-xs font-semibold text-slate-600">
-                  Abas Mensais da Planilha (criadas automaticamente conforme a data do comprovante):
+                  Abas Mensais da Planilha (formato MM-AAAA criado automaticamente por sheets_service.py):
                 </span>
                 <div className="flex items-center gap-1.5 p-1 bg-slate-100 rounded-lg overflow-x-auto">
                   {availableMonthTabs.map((tab) => (
@@ -1218,26 +1295,28 @@ export default function App() {
                 ))}
               </div>
 
-              {/* Tabela de Alta Densidade */}
+              {/* Tabela de Alta Densidade com as 9 colunas de sheets_service.py */}
               <div className="overflow-x-auto border border-slate-200 rounded-lg">
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
-                      <th className="py-3 px-4">Aba (Mês/Ano)</th>
-                      <th className="py-3 px-4">Data</th>
-                      <th className="py-3 px-4">Estabelecimento</th>
-                      <th className="py-3 px-4 text-right">Valor (R$)</th>
-                      <th className="py-3 px-4">Categoria</th>
-                      <th className="py-3 px-4">Forma de Pagamento</th>
-                      <th className="py-3 px-4">Observações (Legenda)</th>
-                      <th className="py-3 px-4">Responsável</th>
-                      <th className="py-3 px-4 text-right">Ação</th>
+                      <th className="py-3 px-3">Aba</th>
+                      <th className="py-3 px-3">Date</th>
+                      <th className="py-3 px-3">Establishment</th>
+                      <th className="py-3 px-3">Doc Type</th>
+                      <th className="py-3 px-3">Category</th>
+                      <th className="py-3 px-3">Payment</th>
+                      <th className="py-3 px-3 text-right">Value</th>
+                      <th className="py-3 px-3">Responsible</th>
+                      <th className="py-3 px-3">Receipt Link</th>
+                      <th className="py-3 px-3">Obs</th>
+                      <th className="py-3 px-3 text-right">Ação</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200 text-xs">
                     {filteredSheetRows.length === 0 ? (
                       <tr>
-                        <td colSpan={9} className="py-8 text-center text-slate-500">
+                        <td colSpan={11} className="py-8 text-center text-slate-500">
                           Nenhum lançamento encontrado para esta aba/filtro. Simule um novo recibo na aba{' '}
                           <button
                             type="button"
@@ -1252,29 +1331,53 @@ export default function App() {
                     ) : (
                       filteredSheetRows.map((row) => (
                         <tr key={row.id} className="hover:bg-slate-50">
-                          <td className="py-3 px-4 font-mono text-slate-700 whitespace-nowrap">
+                          <td className="py-3 px-3 font-mono text-slate-700 whitespace-nowrap">
                             {row.aba_mes}
                           </td>
-                          <td className="py-3 px-4 font-mono tabular-nums text-slate-700 whitespace-nowrap">
+                          <td className="py-3 px-3 font-mono tabular-nums text-slate-700 whitespace-nowrap">
                             {row.data}
                           </td>
-                          <td className="py-3 px-4 font-semibold text-slate-900">
+                          <td className="py-3 px-3 font-semibold text-slate-900">
                             {row.estabelecimento}
                           </td>
-                          <td className="py-3 px-4 font-mono tabular-nums font-bold text-slate-900 text-right whitespace-nowrap">
-                            R$ {row.valor}
+                          <td className="py-3 px-3 text-slate-600 whitespace-nowrap">
+                            {row.tipo_documento}
                           </td>
-                          <td className="py-3 px-4 text-slate-800 font-medium whitespace-nowrap">
+                          <td className="py-3 px-3 text-slate-800 font-medium whitespace-nowrap">
                             {row.categoria}
                           </td>
-                          <td className="py-3 px-4 text-slate-600 whitespace-nowrap">
+                          <td className="py-3 px-3 text-slate-600 whitespace-nowrap">
                             {row.forma_pagamento}
                           </td>
-                          <td className="py-3 px-4 text-slate-600">{row.observacoes}</td>
-                          <td className="py-3 px-4 font-medium text-blue-700 whitespace-nowrap">
+                          <td className="py-3 px-3 font-mono tabular-nums font-bold text-slate-900 text-right whitespace-nowrap">
+                            R$ {row.valor}
+                          </td>
+                          <td className="py-3 px-3 font-medium text-slate-800 whitespace-nowrap">
                             {row.responsavel}
                           </td>
-                          <td className="py-3 px-4 text-right whitespace-nowrap">
+                          <td className="py-3 px-3 whitespace-nowrap">
+                            <div className="space-y-0.5">
+                              <a
+                                href={row.file_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800 font-semibold underline"
+                              >
+                                Ver Comprovante
+                                <ExternalLink className="w-3 h-3" />
+                              </a>
+                              <p
+                                className="font-mono text-[10px] text-slate-400 max-w-[170px] truncate"
+                                title={row.formula_hyperlink}
+                              >
+                                {row.formula_hyperlink}
+                              </p>
+                            </div>
+                          </td>
+                          <td className="py-3 px-3 text-slate-600 max-w-[180px] truncate">
+                            {row.observacoes}
+                          </td>
+                          <td className="py-3 px-3 text-right whitespace-nowrap">
                             <button
                               type="button"
                               onClick={() =>
@@ -1303,90 +1406,82 @@ export default function App() {
           <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-3">
               <h3 className="text-base font-bold text-slate-900">
-                1. Especificações Rigorosas do OCR.space
+                1. Link Oficial do Telegram + Fórmula =HYPERLINK no Google Sheets
+              </h3>
+              <ul className="space-y-2.5 text-xs text-slate-600 leading-relaxed">
+                <li>
+                  • <strong className="text-slate-900">Zero Custo de Storage (S3/Cloud):</strong>{' '}
+                  Quando o bot chama <code className="font-mono">getFile</code> na API do Telegram,
+                  ele obtém o <code className="font-mono">file_path</code> e monta a URL oficial{' '}
+                  <code className="font-mono text-slate-800">
+                    https://api.telegram.org/file/bot&lt;TOKEN&gt;/&lt;file_path&gt;
+                  </code>
+                  .
+                </li>
+                <li>
+                  • <strong className="text-slate-900">Fórmula Clicável Limpa:</strong> Em{' '}
+                  <code className="font-mono">sheets_service.py</code>, formatamos a célula como{' '}
+                  <code className="font-mono text-slate-800">
+                    =HYPERLINK(&quot;url&quot;; &quot;Ver Comprovante&quot;)
+                  </code>{' '}
+                  para que a planilha exiba apenas o botão limpo <strong>Ver Comprovante</strong>.
+                </li>
+                <li>
+                  • <strong className="text-slate-900">Parâmetro USER_ENTERED Obrigatório:</strong>{' '}
+                  Na chamada{' '}
+                  <code className="font-mono">
+                    worksheet.append_row(row_data, value_input_option=&apos;USER_ENTERED&apos;)
+                  </code>
+                  , o Google Sheets interpreta a fórmula <code className="font-mono">=HYPERLINK</code>{' '}
+                  como link ativo em vez de texto puro.
+                </li>
+              </ul>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-3">
+              <h3 className="text-base font-bold text-slate-900">
+                2. Especificações Rigorosas do OCR.space
               </h3>
               <ul className="space-y-2.5 text-xs text-slate-600 leading-relaxed">
                 <li>
                   • <strong className="text-slate-900">Header de Autenticação:</strong> A chave{' '}
                   <code className="font-mono text-slate-800">OCR_SPACE_API_KEY</code> é enviada
-                  estritamente no cabeçalho HTTP <code className="font-mono">apikey</code>, evitando
-                  exposição na query string da URL.
+                  estritamente no cabeçalho HTTP <code className="font-mono">apikey</code>.
                 </li>
                 <li>
                   • <strong className="text-slate-900">Prefixo Base64 Obrigatório:</strong> Ao
                   converter os bytes baixados do Telegram, o payload inclui obrigatoriamente{' '}
                   <code className="font-mono text-slate-800">data:image/jpeg;base64,...</code> ou{' '}
                   <code className="font-mono text-slate-800">data:application/pdf;base64,...</code>.
-                  Sem esse prefixo, a API retorna erro de formato inválido.
-                </li>
-                <li>
-                  • <strong className="text-slate-900">Parâmetros de Precisão para Recibos:</strong>{' '}
-                  Utilizamos <code className="font-mono">language=&quot;por&quot;</code>,{' '}
-                  <code className="font-mono">isTable=&quot;true&quot;</code> (preserva a quebra
-                  linha a linha dos itens e do valor total) e{' '}
-                  <code className="font-mono">OCREngine=&quot;2&quot;</code> (ideal para cupons
-                  fiscais com fontes térmicas e caracteres especiais como R$) ou{' '}
-                  <code className="font-mono">OCREngine=&quot;3&quot;</code>.
                 </li>
                 <li>
                   • <strong className="text-slate-900">Limites do Plano Gratuito:</strong> Tamanho
                   máximo de <strong>1 MB (1.024 KB)</strong> por arquivo, até 3 páginas por PDF e
-                  cota de 25.000 requisições/mês. O bot valida{' '}
-                  <code className="font-mono">len(conteudo_bytes) &gt; 1024 * 1024</code> antes de
-                  chamar a API.
+                  parâmetros <code className="font-mono">OCREngine=&quot;2&quot;</code> e{' '}
+                  <code className="font-mono">isTable=&quot;true&quot;</code>.
                 </li>
               </ul>
             </div>
 
             <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-3">
               <h3 className="text-base font-bold text-slate-900">
-                2. Gerenciamento de Estado Assíncrono no Telegram
+                3. Gerenciamento de Estado Assíncrono no Telegram
               </h3>
               <ul className="space-y-2.5 text-xs text-slate-600 leading-relaxed">
                 <li>
                   • <strong className="text-slate-900">Restrição de 64 Bytes do Telegram:</strong>{' '}
-                  O campo <code className="font-mono">callback_data</code> dos botões inline do
-                  Telegram aceita no máximo 64 bytes. Por isso, não é possível embutir todos os
-                  dados do recibo dentro do próprio botão.
+                  O campo <code className="font-mono">callback_data</code> dos botões inline aceita
+                  no máximo 64 bytes. Por isso, usamos <code className="font-mono">estado_id</code>{' '}
+                  curto (<code className="font-mono">file_unique_id</code>) e guardamos a{' '}
+                  <code className="font-mono">file_url</code> completa em{' '}
+                  <code className="font-mono">DADOS_TEMPORARIOS[estado_id]</code>.
                 </li>
                 <li>
-                  • <strong className="text-slate-900">Dicionário DADOS_TEMPORARIOS:</strong> Quando
-                  o OCR termina em background, geramos um identificador curto de 8 caracteres (
-                  <code className="font-mono">token_estado = uuid.uuid4().hex[:8]</code>), salvamos
-                  o dicionário completo em <code className="font-mono">DADOS_TEMPORARIOS</code> e
-                  enviamos nos botões apenas <code className="font-mono">cat|token|Categoria</code>.
-                </li>
-                <li>
-                  • <strong className="text-slate-900">Worker Único no Render:</strong> No{' '}
-                  <code className="font-mono">Procfile</code>, especificamos{' '}
-                  <code className="font-mono">--workers 1</code> no Uvicorn para garantir que o
-                  webhook da foto e o webhook do clique no botão acessem o mesmo espaço de memória
-                  RAM.
-                </li>
-              </ul>
-            </div>
-
-            <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-3">
-              <h3 className="text-base font-bold text-slate-900">
-                3. BackgroundTasks e Resiliência de Rede (Try/Except)
-              </h3>
-              <ul className="space-y-2.5 text-xs text-slate-600 leading-relaxed">
-                <li>
-                  • <strong className="text-slate-900">Evitando Retries Duplicados:</strong> Se o
-                  webhook demorar mais de alguns segundos para responder HTTP 200, o Telegram
-                  reenvia a mesma foto várias vezes. Por isso, a rota{' '}
-                  <code className="font-mono">/webhook</code> delega o download e o OCR para{' '}
-                  <code className="font-mono">BackgroundTasks</code> do FastAPI e retorna{' '}
-                  <code className="font-mono">{`{"ok": True}`}</code> imediatamente.
-                </li>
-                <li>
-                  • <strong className="text-slate-900">Isolamento de Exceções:</strong> As funções{' '}
-                  <code className="font-mono">baixar_arquivo_telegram</code>,{' '}
-                  <code className="font-mono">processar_ocr_space_base64</code> e{' '}
-                  <code className="font-mono">salvar_linha_planilha</code> possuem blocos{' '}
-                  <code className="font-mono">try/except</code> específicos para{' '}
-                  <code className="font-mono">httpx.TimeoutException</code> e falhas de API,
-                  notificando o usuário no grupo sem derrubar o servidor.
+                  • <strong className="text-slate-900">Prevenção de Duplicidade:</strong> Antes de
+                  inserir a linha na aba <code className="font-mono">MM-AAAA</code>,{' '}
+                  <code className="font-mono">sheets_service.py</code> consulta{' '}
+                  <code className="font-mono">worksheet.get_all_records()</code> e verifica se já
+                  existe um lançamento com a mesma Data, Valor e Estabelecimento.
                 </li>
               </ul>
             </div>
@@ -1397,24 +1492,17 @@ export default function App() {
               </h3>
               <ul className="space-y-2.5 text-xs text-slate-600 leading-relaxed">
                 <li>
-                  • <strong className="text-slate-900">Credenciais sem Arquivo Físico no Git:</strong>{' '}
-                  No Render, basta colar o conteúdo do JSON da Service Account na variável de
-                  ambiente <code className="font-mono">GOOGLE_CREDENTIALS_JSON</code>. O código
-                  detecta automaticamente se o valor começa com <code className="font-mono">{`{`}</code> e
-                  usa <code className="font-mono">Credentials.from_service_account_info()</code>.
+                  • <strong className="text-slate-900">Credenciais Seguras no Render:</strong>{' '}
+                  Cole o JSON da Service Account na variável de ambiente{' '}
+                  <code className="font-mono">GOOGLE_CREDENTIALS_JSON</code>. O módulo{' '}
+                  <code className="font-mono">sheets_service.py</code> sanitiza aspas extras e
+                  quebras <code className="font-mono">\n</code> automaticamente.
                 </li>
                 <li>
-                  • <strong className="text-slate-900">Permissão de Editor:</strong> Lembre-se de
-                  copiar o <code className="font-mono">client_email</code> do JSON da Service
-                  Account e compartilhar sua planilha no Google Sheets com esse e-mail como{' '}
-                  <strong>Editor</strong>.
-                </li>
-                <li>
-                  • <strong className="text-slate-900">Rollback Automático de Estado:</strong> Se a
-                  gravação no Google Sheets falhar momentaneamente quando o usuário clicar na
-                  categoria, o código restaura o recibo em{' '}
-                  <code className="font-mono">DADOS_TEMPORARIOS[token]</code> para que o clique
-                  possa ser repetido sem reenviar a foto.
+                  • <strong className="text-slate-900">Criação Automática de Abas MM-AAAA:</strong>{' '}
+                  Se a aba do mês (ex: <code className="font-mono">11-2026</code>) ainda não existir
+                  na planilha, <code className="font-mono">spreadsheet.add_worksheet()</code> cria a
+                  aba e já adiciona os 9 cabeçalhos padrão.
                 </li>
               </ul>
             </div>
@@ -1429,10 +1517,11 @@ export default function App() {
             Arquitetura Python FastAPI · Integração Oficial OCR.space, Telegram Bot API &amp; Google Sheets
           </span>
           <span>
-            Arquivos gerados no projeto: /python_bot/main.py · /python_bot/requirements.txt · /python_bot/Procfile
+            Arquivos prontos na raiz: /main.py · /sheets_service.py · /requirements.txt · /Procfile
           </span>
         </div>
       </footer>
     </div>
   );
 }
+

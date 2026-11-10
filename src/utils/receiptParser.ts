@@ -2,43 +2,30 @@ export interface ParsedReceiptData {
   data: string;
   aba_mes: string;
   estabelecimento: string;
+  tipo_documento: string;
   valor: string;
   forma_pagamento: string;
   observacoes: string;
   texto_bruto: string;
 }
 
-const MESES_PT_NOMES: Record<number, string> = {
-  1: 'Janeiro',
-  2: 'Fevereiro',
-  3: 'Março',
-  4: 'Abril',
-  5: 'Maio',
-  6: 'Junho',
-  7: 'Julho',
-  8: 'Agosto',
-  9: 'Setembro',
-  10: 'Outubro',
-  11: 'Novembro',
-  12: 'Dezembro',
-};
-
+/**
+ * Converte a data DD/MM/AAAA para o formato de aba MM-AAAA (ex: '11-2026')
+ * conforme implementado no `sheets_service.py`.
+ */
 export function obterAbaMesTS(dataStr: string): string {
-  const hoje = new Date();
-  let mes = hoje.getMonth() + 1;
-  let ano = hoje.getFullYear();
-
   const match = dataStr.match(/\b(\d{2})\/(\d{2})\/(\d{2,4})\b/);
   if (match) {
-    const m = parseInt(match[2], 10);
-    let y = parseInt(match[3], 10);
-    if (y < 100) y += 2000;
-    if (m >= 1 && m <= 12) {
-      mes = m;
-      ano = y;
-    }
+    const mes = match[2];
+    const ano = match[3].length === 2 ? `20${match[3]}` : match[3];
+    return `${mes}-${ano}`;
   }
-  return `${MESES_PT_NOMES[mes] || 'Mês'}/${ano}`;
+  const partes = dataStr.split('/');
+  if (partes.length === 3) {
+    const ano = partes[2].length === 4 ? partes[2] : `20${partes[2]}`;
+    return `${partes[1]}-${ano}`;
+  }
+  return 'Geral';
 }
 
 /**
@@ -104,7 +91,7 @@ export function extrairDadosReciboTS(
 
   // Forma de Pagamento
   const upperText = textoOcr.toUpperCase();
-  let formaPagamento = 'Não informada';
+  let formaPagamento = 'Outros';
   if (upperText.includes('PIX')) {
     formaPagamento = 'PIX';
   } else if (upperText.includes('CREDITO') || upperText.includes('CRÉDITO')) {
@@ -117,13 +104,30 @@ export function extrairDadosReciboTS(
     formaPagamento = 'Boleto';
   }
 
+  // Tipo de Documento (Doc Type)
+  let tipoDocumento = 'Recibo';
+  if (
+    upperText.includes('NOTA FISCAL') ||
+    upperText.includes('DANFE') ||
+    upperText.includes('NF-E')
+  ) {
+    tipoDocumento = 'Nota Fiscal';
+  } else if (
+    upperText.includes('CUPOM') ||
+    upperText.includes('SAT') ||
+    upperText.includes('NFC-E')
+  ) {
+    tipoDocumento = 'Cupom Fiscal';
+  }
+
   return {
     data: dataExtraida,
     aba_mes: obterAbaMesTS(dataExtraida),
     estabelecimento,
+    tipo_documento: tipoDocumento,
     valor: valorExtraido,
     forma_pagamento: formaPagamento,
-    observacoes: legendaUsuario.trim() || 'Sem observações',
+    observacoes: legendaUsuario.trim() || '',
     texto_bruto: textoOcr,
   };
 }
