@@ -23,6 +23,7 @@ export type CategoriaGasto = (typeof CATEGORIAS_GASTO)[number];
 export interface SheetRow {
   id: string;
   data: string;
+  aba_mes: string;
   estabelecimento: string;
   valor: string;
   categoria: CategoriaGasto;
@@ -35,7 +36,7 @@ export interface SheetRow {
 export const RECEIPT_SAMPLES: ReceiptSample[] = [
   {
     id: 'posto-shell',
-    title: 'Cupom Fiscal — Posto Avenida (Combustível)',
+    title: 'Cupom Fiscal — Posto Avenida (Novembro/2026)',
     type: 'image/jpeg',
     sizeKb: 384,
     caption: 'Abastecimento frota caminhão placa ABC-1234',
@@ -57,7 +58,7 @@ OBRIGADO E VOLTE SEMPRE!`,
   },
   {
     id: 'leroy-merlin',
-    title: 'Nota Fiscal — Casa das Ferramentas & Materiais',
+    title: 'Nota Fiscal — Casa das Ferramentas (Outubro/2026)',
     type: 'image/jpeg',
     sizeKb: 612,
     caption: 'Compra de discos de corte e jogo de chaves obra Sul',
@@ -67,7 +68,7 @@ CNPJ: 61.092.441/0003-11
 RUA DO GASOMETRO, 412 - BRAS
 ----------------------------------------
 CUPOM FISCAL ELETRONICO - SAT
-EMISSAO: 09/11/2026 15:18:04
+EMISSAO: 24/10/2026 15:18:04
 ----------------------------------------
 01 DISCO CORTE INOX 4.1/2     R$  84,00
 02 JOGO CHAVE COMBINADA 12PC  R$ 245,50
@@ -78,7 +79,7 @@ PAGAMENTO: PIX QR CODE CONCLUIDO`,
   },
   {
     id: 'oficina-mecanica',
-    title: 'Ordem de Serviço PDF — Oficina Diesel Center',
+    title: 'Ordem de Serviço PDF — Oficina Diesel Center (Novembro/2026)',
     type: 'application/pdf',
     sizeKb: 845,
     caption: 'Troca de óleo, filtros e alinhamento revisão 40.000km',
@@ -110,6 +111,7 @@ export const INITIAL_SHEET_ROWS: SheetRow[] = [
   {
     id: 'row-1',
     data: '07/11/2026',
+    aba_mes: 'Novembro/2026',
     estabelecimento: 'MADEIREIRA E MATERIAIS SAO JORGE',
     valor: '890,00',
     categoria: 'Material',
@@ -121,6 +123,7 @@ export const INITIAL_SHEET_ROWS: SheetRow[] = [
   {
     id: 'row-2',
     data: '08/11/2026',
+    aba_mes: 'Novembro/2026',
     estabelecimento: 'RESTAURANTE ESTRADA REAL LTDA',
     valor: '148,50',
     categoria: 'Despesa',
@@ -128,6 +131,18 @@ export const INITIAL_SHEET_ROWS: SheetRow[] = [
     observacoes: 'Almoço equipe técnica viagem Campinas',
     responsavel: 'Marcos Silva (@marcos_eng)',
     token_origem: '3b19e7a4',
+  },
+  {
+    id: 'row-3',
+    data: '22/10/2026',
+    aba_mes: 'Outubro/2026',
+    estabelecimento: 'LOCADORA DE EQUIPAMENTOS CENTRAL',
+    valor: '650,00',
+    categoria: 'Ferramentas',
+    forma_pagamento: 'Boleto',
+    observacoes: 'Locação martelete rompedor 15kg',
+    responsavel: 'Carlos Mendes (@carlos_obras)',
+    token_origem: '9d41a2b1',
   },
 ];
 
@@ -147,8 +162,40 @@ app = FastAPI(title="Meu Bot de Finanças — Telegram + OCR.space + Google Shee
 # Chave: estado_id (file_unique_id curto, seguro para o limite de 64 bytes do callback_data)
 DADOS_TEMPORARIOS = {}
 
-# 1. Configuração do Google Sheets com tratamento de erros e suporte robusto a credenciais
-def obter_planilha():
+MESES_PT = {
+    1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril",
+    5: "Maio", 6: "Junho", 7: "Julho", 8: "Agosto",
+    9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro"
+}
+
+CABECALHO_PLANILHA = [
+    "Data", "Estabelecimento", "Valor", "Categoria",
+    "Forma de Pagamento", "Observações", "Responsável"
+]
+
+def obter_nome_aba_mes(data_str: str) -> str:
+    """
+    Converte a data extraída do comprovante (DD/MM/AAAA ou DD/MM/AA)
+    no nome da aba mensal correspondente (ex: 'Novembro/2026').
+    """
+    hoje = datetime.now()
+    mes, ano = hoje.month, hoje.year
+    if data_str:
+        match = re.search(r"\\b(\\d{2})/(\\d{2})/(\\d{2,4})\\b", str(data_str))
+        if match:
+            try:
+                m = int(match.group(2))
+                y = int(match.group(3))
+                if y < 100:
+                    y += 2000
+                if 1 <= m <= 12:
+                    mes, ano = m, y
+            except ValueError:
+                pass
+    return f"{MESES_PT.get(mes, 'Mês')}/{ano}"
+
+# 1. Configuração do Google Sheets com separação automática de abas por mês do comprovante
+def obter_planilha(data_comprovante: str = ""):
     creds_raw = (
         os.environ.get("GOOGLE_CREDENTIALS_JSON")
         or os.environ.get("GOOGLE_CREDENTIALS")
@@ -197,7 +244,17 @@ def obter_planilha():
         if not sheet_id:
             raise RuntimeError("A variável SPREADSHEET_ID não foi configurada no Render.")
 
-        return client.open_by_key(sheet_id).sheet1
+        spreadsheet = client.open_by_key(sheet_id)
+        nome_aba = obter_nome_aba_mes(data_comprovante)
+
+        try:
+            aba = spreadsheet.worksheet(nome_aba)
+        except gspread.exceptions.WorksheetNotFound:
+            # Cria automaticamente a aba do mês se ainda não existir e insere o cabeçalho
+            aba = spreadsheet.add_worksheet(title=nome_aba, rows=1000, cols=10)
+            aba.append_row(CABECALHO_PLANILHA, value_input_option="USER_ENTERED")
+
+        return aba, nome_aba
     except json.JSONDecodeError as je:
         raise RuntimeError(
             f"GOOGLE_CREDENTIALS_JSON inválido (cole o JSON completo começando com '{{'): {str(je)}"
@@ -442,6 +499,8 @@ async def telegram_webhook(request: Request):
             dados["responsavel"] = responsavel
             
             # Salva dados extraídos temporariamente usando o estado_id curto (file_unique_id)
+            nome_aba_prevista = obter_nome_aba_mes(dados.get("data", ""))
+            dados["aba_mes"] = nome_aba_prevista
             DADOS_TEMPORARIOS[estado_id] = dados
             
             obs_text = f"\\n• *Observação:* {caption}" if caption else ""
@@ -449,7 +508,7 @@ async def telegram_webhook(request: Request):
                 f"🧾 *Leitura do Recibo Concluída!*\\n\\n"
                 f"• *Responsável:* {responsavel}\\n"
                 f"• *Local:* {dados.get('estabelecimento')}\\n"
-                f"• *Data:* {dados.get('data')}\\n"
+                f"• *Data:* {dados.get('data')} _(Aba: {nome_aba_prevista})_\\n"
                 f"• *Valor:* R$ {dados.get('valor'):.2f}\\n"
                 f"• *Pagamento:* {dados.get('pagamento')}"
                 f"{obs_text}\\n\\n"
@@ -479,7 +538,7 @@ async def telegram_webhook(request: Request):
                     dados["responsavel"] = extrair_nome_remetente(callback.get("from", {}))
                 
                 try:
-                    planilha = obter_planilha()
+                    planilha_aba, nome_aba = obter_planilha(dados.get("data", ""))
                     # Colunas: [Data, Estabelecimento, Valor, Categoria, Forma de Pagamento, Observações, Responsável]
                     linha = [
                         dados.get("data", ""),
@@ -490,13 +549,14 @@ async def telegram_webhook(request: Request):
                         dados.get("observacoes", ""),
                         dados.get("responsavel", "")
                     ]
-                    planilha.append_row(linha, value_input_option="USER_ENTERED")
+                    planilha_aba.append_row(linha, value_input_option="USER_ENTERED")
                     
-                    responder_callback_query(callback_id, f"Categoria '{categoria}' selecionada!")
+                    responder_callback_query(callback_id, f"Salvo na aba '{nome_aba}' ({categoria})!")
                     
                     obs_text = f"\\n• *Observação:* {dados.get('observacoes')}" if dados.get('observacoes') else ""
                     msg_sucesso = (
                         f"✅ *Gasto Registrado no Google Sheets!*\\n\\n"
+                        f"• *Aba do Mês:* {nome_aba}\\n"
                         f"• *Responsável:* {dados.get('responsavel')}\\n"
                         f"• *Local:* {dados.get('estabelecimento')}\\n"
                         f"• *Data:* {dados.get('data')}\\n"

@@ -84,6 +84,7 @@ export default function App() {
       sizeKb: 384,
       ocrEngine: '2',
       data: '10/11/2026',
+      aba_mes: 'Novembro/2026',
       estabelecimento: 'AUTO POSTO AVENIDA LTDA',
       valor: '461,90',
       forma_pagamento: 'Cartão de Débito',
@@ -99,7 +100,7 @@ export default function App() {
       id: 'msg-init-1',
       sender: 'user',
       timestamp: '11:35:10',
-      title: 'Cupom Fiscal — Posto Avenida (Combustível)',
+      title: 'Cupom Fiscal — Posto Avenida (Novembro/2026)',
       caption: 'Abastecimento frota caminhão placa ABC-1234',
       responsavel: 'João Oliveira (@joao_frota)',
       fileType: 'image/jpeg',
@@ -110,15 +111,22 @@ export default function App() {
       id: 'msg-init-2',
       sender: 'bot',
       timestamp: '11:35:12',
-      text: 'Recibo processado via OCR.space (Engine 2 · isTable=True). Escolha a categoria abaixo para gravar na planilha:',
+      text: 'Recibo processado via OCR.space (Engine 2 · isTable=True). Escolha a categoria abaixo para gravar na aba do mês:',
       pendingToken: 'a94f21c8',
     },
   ]);
 
-  // Linhas salvas no Google Sheets
+  // Linhas salvas no Google Sheets (separadas por abas mensais)
   const [sheetRows, setSheetRows] = useState<SheetRow[]>(INITIAL_SHEET_ROWS);
+  const [activeMonthTab, setActiveMonthTab] = useState<string>('Todas as Abas');
   const [sheetFilter, setSheetFilter] = useState<string>('Todas');
   const [sheetSearch, setSheetSearch] = useState<string>('');
+
+  // Lista dinâmica de abas mensais existentes na planilha
+  const availableMonthTabs = useMemo(() => {
+    const tabs = Array.from(new Set(sheetRows.map((r) => r.aba_mes)));
+    return ['Todas as Abas', ...tabs];
+  }, [sheetRows]);
 
   // Seleção de exemplo de recibo
   const handleSelectSample = (sampleId: string) => {
@@ -197,7 +205,7 @@ export default function App() {
         id: `msg-b-${Date.now()}`,
         sender: 'bot',
         timestamp: new Date().toTimeString().slice(0, 8),
-        text: `Recibo processado via OCR.space (OCREngine=${selectedEngine}, language="por", isTable=True). Selecione a categoria do gasto:`,
+        text: `Recibo processado via OCR.space (OCREngine=${selectedEngine}, language="por", isTable=True). Aba destino: ${parsed.aba_mes}. Selecione a categoria:`,
         pendingToken: token,
       };
 
@@ -314,7 +322,7 @@ export default function App() {
         id: `msg-b-${Date.now()}`,
         sender: 'bot',
         timestamp: new Date().toTimeString().slice(0, 8),
-        text: `Arquivo "${file.name}" processado com prefixo Base64 (${mimeType}). Selecione a categoria abaixo:`,
+        text: `Arquivo "${file.name}" processado. Aba destino: ${parsed.aba_mes}. Selecione a categoria abaixo:`,
         pendingToken: token,
       };
 
@@ -323,7 +331,7 @@ export default function App() {
     reader.readAsDataURL(file);
   };
 
-  // Clique em um botão do Inline Keyboard do Telegram (callback_query: cat|<token>|<categoria>)
+  // Clique em um botão do Inline Keyboard do Telegram (callback_query: cat|<categoria>|<token>)
   const handleSelectCategory = (messageId: string, token: string, categoria: CategoriaGasto) => {
     const pending = dadosTemporarios[token];
     if (!pending) return;
@@ -331,6 +339,7 @@ export default function App() {
     const newRow: SheetRow = {
       id: `row-${Date.now()}`,
       data: pending.data,
+      aba_mes: pending.aba_mes,
       estabelecimento: pending.estabelecimento,
       valor: pending.valor,
       categoria,
@@ -401,6 +410,7 @@ export default function App() {
 
   const handleExportCsv = () => {
     const headers = [
+      'Aba (Mes/Ano)',
       'Data',
       'Estabelecimento',
       'Valor (R$)',
@@ -409,7 +419,8 @@ export default function App() {
       'Observacoes',
       'Responsavel',
     ];
-    const rows = sheetRows.map((r) => [
+    const rows = filteredSheetRows.map((r) => [
+      r.aba_mes,
       r.data,
       `"${r.estabelecimento.replace(/"/g, '""')}"`,
       `"${r.valor}"`,
@@ -424,16 +435,19 @@ export default function App() {
 
   const filteredSheetRows = useMemo(() => {
     return sheetRows.filter((row) => {
+      const matchesMonth =
+        activeMonthTab === 'Todas as Abas' || row.aba_mes === activeMonthTab;
       const matchesCat = sheetFilter === 'Todas' || row.categoria === sheetFilter;
       const matchesQuery =
         !sheetSearch.trim() ||
         row.estabelecimento.toLowerCase().includes(sheetSearch.toLowerCase()) ||
         row.observacoes.toLowerCase().includes(sheetSearch.toLowerCase()) ||
         row.responsavel.toLowerCase().includes(sheetSearch.toLowerCase()) ||
+        row.aba_mes.toLowerCase().includes(sheetSearch.toLowerCase()) ||
         row.forma_pagamento.toLowerCase().includes(sheetSearch.toLowerCase());
-      return matchesCat && matchesQuery;
+      return matchesMonth && matchesCat && matchesQuery;
     });
-  }, [sheetRows, sheetFilter, sheetSearch]);
+  }, [sheetRows, activeMonthTab, sheetFilter, sheetSearch]);
 
   const totalAcumulado = useMemo(() => {
     return filteredSheetRows.reduce((acc, row) => {
@@ -844,9 +858,9 @@ export default function App() {
                                   </span>
                                 </div>
                                 <div>
-                                  <span className="text-slate-500">Data:</span>{' '}
+                                  <span className="text-slate-500">Data e Aba do Mês:</span>{' '}
                                   <span className="font-semibold text-slate-900 tabular-nums">
-                                    {pendingData.data}
+                                    {pendingData.data} → Aba [{pendingData.aba_mes}]
                                   </span>
                                 </div>
                                 <div>
@@ -911,7 +925,7 @@ export default function App() {
                               <div className="flex items-center gap-2">
                                 <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
                                 <span>
-                                  Salvo no Google Sheets na categoria{' '}
+                                  Salvo na aba do mês correspondente na categoria{' '}
                                   <strong className="font-bold">{msg.resolvedCategory}</strong>!
                                 </span>
                               </div>
@@ -957,15 +971,15 @@ export default function App() {
                 </pre>
               </div>
 
-              {/* Últimos Registros Gravados no Google Sheets */}
+              {/* Últimos Registros Gravados no Google Sheets (Separados por Aba do Mês) */}
               <div className="lg:col-span-7 bg-white border border-slate-200 rounded-xl p-6 space-y-4">
                 <div className="flex items-center justify-between">
                   <div>
                     <h3 className="text-sm font-bold text-slate-900">
-                      4. Espelho Google Sheets (sheet.append_row via gspread)
+                      4. Espelho Google Sheets (Abas separadas por Mês do Comprovante)
                     </h3>
                     <p className="text-xs text-slate-500">
-                      Colunas: Data · Estabelecimento · Valor · Categoria · Pagamento · Observações · Responsável
+                      Cria ou abre automaticamente a aba Mês/Ano (ex: Novembro/2026, Outubro/2026)
                     </p>
                   </div>
                   <button
@@ -978,26 +992,46 @@ export default function App() {
                   </button>
                 </div>
 
+                {/* Abas Mensais estilo Planilha Google Sheets */}
+                <div className="flex items-center gap-1.5 p-1 bg-slate-100 rounded-lg overflow-x-auto">
+                  {availableMonthTabs.map((tab) => (
+                    <button
+                      key={tab}
+                      type="button"
+                      onClick={() => setActiveMonthTab(tab)}
+                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        activeMonthTab === tab
+                          ? 'bg-white text-blue-700 shadow-xs font-semibold'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {tab}
+                    </button>
+                  ))}
+                </div>
+
                 <div className="overflow-x-auto border border-slate-200 rounded-lg">
                   <table className="w-full text-left border-collapse">
                     <thead>
                       <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-600">
+                        <th className="py-2.5 px-3">Aba do Mês</th>
                         <th className="py-2.5 px-3">Data</th>
                         <th className="py-2.5 px-3">Estabelecimento</th>
                         <th className="py-2.5 px-3 text-right">Valor (R$)</th>
                         <th className="py-2.5 px-3">Categoria</th>
-                        <th className="py-2.5 px-3">Pagamento</th>
-                        <th className="py-2.5 px-3">Observações</th>
                         <th className="py-2.5 px-3">Responsável</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200 text-xs">
-                      {sheetRows.slice(0, 5).map((row) => (
+                      {filteredSheetRows.slice(0, 5).map((row) => (
                         <tr key={row.id} className="hover:bg-slate-50">
+                          <td className="py-2.5 px-3 font-mono text-slate-700 whitespace-nowrap">
+                            {row.aba_mes}
+                          </td>
                           <td className="py-2.5 px-3 font-mono tabular-nums text-slate-600 whitespace-nowrap">
                             {row.data}
                           </td>
-                          <td className="py-2.5 px-3 font-medium text-slate-900 max-w-[160px] truncate">
+                          <td className="py-2.5 px-3 font-medium text-slate-900 max-w-[150px] truncate">
                             {row.estabelecimento}
                           </td>
                           <td className="py-2.5 px-3 font-mono tabular-nums font-semibold text-slate-900 text-right whitespace-nowrap">
@@ -1005,12 +1039,6 @@ export default function App() {
                           </td>
                           <td className="py-2.5 px-3 text-slate-700 whitespace-nowrap">
                             {row.categoria}
-                          </td>
-                          <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">
-                            {row.forma_pagamento}
-                          </td>
-                          <td className="py-2.5 px-3 text-slate-500 max-w-[160px] truncate">
-                            {row.observacoes}
                           </td>
                           <td className="py-2.5 px-3 font-medium text-blue-700 whitespace-nowrap">
                             {row.responsavel}
@@ -1112,10 +1140,10 @@ export default function App() {
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div>
                   <h2 className="text-base font-bold text-slate-900">
-                    Registros Estruturados no Google Sheets
+                    Registros Estruturados no Google Sheets (Separados por Aba do Mês)
                   </h2>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Total filtrado: R${' '}
+                    Aba selecionada: <strong className="text-slate-800">{activeMonthTab}</strong> · Total filtrado: R${' '}
                     <span className="font-mono font-bold tabular-nums text-slate-900">
                       {totalAcumulado.toLocaleString('pt-BR', {
                         minimumFractionDigits: 2,
@@ -1149,6 +1177,29 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Seletor de Abas Mensais da Planilha (Worksheet Tabs) */}
+              <div className="space-y-1.5">
+                <span className="text-xs font-semibold text-slate-600">
+                  Abas Mensais da Planilha (criadas automaticamente conforme a data do comprovante):
+                </span>
+                <div className="flex items-center gap-1.5 p-1 bg-slate-100 rounded-lg overflow-x-auto">
+                  {availableMonthTabs.map((tab) => (
+                    <button
+                      key={tab}
+                      type="button"
+                      onClick={() => setActiveMonthTab(tab)}
+                      className={`px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        activeMonthTab === tab
+                          ? 'bg-white text-blue-700 shadow-xs font-semibold'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {tab}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               {/* Filtro Interativo por Categoria */}
               <div className="flex items-center gap-1.5 p-1 bg-slate-100 rounded-lg overflow-x-auto">
                 {(['Todas', ...CATEGORIAS_GASTO] as const).map((cat) => (
@@ -1172,6 +1223,7 @@ export default function App() {
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
+                      <th className="py-3 px-4">Aba (Mês/Ano)</th>
                       <th className="py-3 px-4">Data</th>
                       <th className="py-3 px-4">Estabelecimento</th>
                       <th className="py-3 px-4 text-right">Valor (R$)</th>
@@ -1185,8 +1237,8 @@ export default function App() {
                   <tbody className="divide-y divide-slate-200 text-xs">
                     {filteredSheetRows.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="py-8 text-center text-slate-500">
-                          Nenhum lançamento encontrado para este filtro. Simule um novo recibo na aba{' '}
+                        <td colSpan={9} className="py-8 text-center text-slate-500">
+                          Nenhum lançamento encontrado para esta aba/filtro. Simule um novo recibo na aba{' '}
                           <button
                             type="button"
                             onClick={() => setActiveSection('simulador')}
@@ -1200,6 +1252,9 @@ export default function App() {
                     ) : (
                       filteredSheetRows.map((row) => (
                         <tr key={row.id} className="hover:bg-slate-50">
+                          <td className="py-3 px-4 font-mono text-slate-700 whitespace-nowrap">
+                            {row.aba_mes}
+                          </td>
                           <td className="py-3 px-4 font-mono tabular-nums text-slate-700 whitespace-nowrap">
                             {row.data}
                           </td>

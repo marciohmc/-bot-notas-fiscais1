@@ -1,10 +1,44 @@
 export interface ParsedReceiptData {
   data: string;
+  aba_mes: string;
   estabelecimento: string;
   valor: string;
   forma_pagamento: string;
   observacoes: string;
   texto_bruto: string;
+}
+
+const MESES_PT_NOMES: Record<number, string> = {
+  1: 'Janeiro',
+  2: 'Fevereiro',
+  3: 'Março',
+  4: 'Abril',
+  5: 'Maio',
+  6: 'Junho',
+  7: 'Julho',
+  8: 'Agosto',
+  9: 'Setembro',
+  10: 'Outubro',
+  11: 'Novembro',
+  12: 'Dezembro',
+};
+
+export function obterAbaMesTS(dataStr: string): string {
+  const hoje = new Date();
+  let mes = hoje.getMonth() + 1;
+  let ano = hoje.getFullYear();
+
+  const match = dataStr.match(/\b(\d{2})\/(\d{2})\/(\d{2,4})\b/);
+  if (match) {
+    const m = parseInt(match[2], 10);
+    let y = parseInt(match[3], 10);
+    if (y < 100) y += 2000;
+    if (m >= 1 && m <= 12) {
+      mes = m;
+      ano = y;
+    }
+  }
+  return `${MESES_PT_NOMES[mes] || 'Mês'}/${ano}`;
 }
 
 /**
@@ -85,6 +119,7 @@ export function extrairDadosReciboTS(
 
   return {
     data: dataExtraida,
+    aba_mes: obterAbaMesTS(dataExtraida),
     estabelecimento,
     valor: valorExtraido,
     forma_pagamento: formaPagamento,

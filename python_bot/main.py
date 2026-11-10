@@ -14,9 +14,62 @@ app = FastAPI(title="Meu Bot de Finanças — Telegram + OCR.space + Google Shee
 # Chave: file_unique_id (curto, seguro para o limite de 64 bytes do callback_data do Telegram)
 DADOS_TEMPORARIOS = {}
 
+MESES_PT = {
+    1: "Janeiro",
+    2: "Fevereiro",
+    3: "Março",
+    4: "Abril",
+    5: "Maio",
+    6: "Junho",
+    7: "Julho",
+    8: "Agosto",
+    9: "Setembro",
+    10: "Outubro",
+    11: "Novembro",
+    12: "Dezembro"
+}
 
-# 1. Configuração do Google Sheets com tratamento de erros e suporte robusto a credenciais
-def obter_planilha():
+CABECALHO_PLANILHA = [
+    "Data",
+    "Estabelecimento",
+    "Valor",
+    "Categoria",
+    "Forma de Pagamento",
+    "Observações",
+    "Responsável"
+]
+
+
+def obter_nome_aba_mes(data_str: str) -> str:
+    """
+    Converte a data extraída do comprovante (DD/MM/AAAA ou DD/MM/AA)
+    no nome da aba mensal correspondente (ex: 'Novembro/2026').
+    Se a data não for identificada, utiliza o mês/ano atual.
+    """
+    hoje = datetime.now()
+    mes = hoje.month
+    ano = hoje.year
+
+    if data_str:
+        match = re.search(r"\b(\d{2})/(\d{2})/(\d{2,4})\b", str(data_str))
+        if match:
+            try:
+                mes_extraido = int(match.group(2))
+                ano_extraido = int(match.group(3))
+                if ano_extraido < 100:
+                    ano_extraido += 2000
+                if 1 <= mes_extraido <= 12:
+                    mes = mes_extraido
+                    ano = ano_extraido
+            except ValueError:
+                pass
+
+    nome_mes = MESES_PT.get(mes, "Mês")
+    return f"{nome_mes}/{ano}"
+
+
+# 1. Configuração do Google Sheets com separação automática de abas por mês do comprovante
+def obter_planilha(data_comprovante: str = ""):
     creds_raw = (
         os.environ.get("GOOGLE_CREDENTIALS_JSON")
         or os.environ.get("GOOGLE_CREDENTIALS")
@@ -70,7 +123,17 @@ def obter_planilha():
                 "A variável de ambiente SPREADSHEET_ID não foi configurada no Render."
             )
 
-        return client.open_by_key(sheet_id).sheet1
+        spreadsheet = client.open_by_key(sheet_id)
+        nome_aba = obter_nome_aba_mes(data_comprovante)
+
+        try:
+            aba = spreadsheet.worksheet(nome_aba)
+        except gspread.exceptions.WorksheetNotFound:
+            # Cria automaticamente a aba do mês se ainda não existir e insere o cabeçalho
+            aba = spreadsheet.add_worksheet(title=nome_aba, rows=1000, cols=10)
+            aba.append_row(CABECALHO_PLANILHA, value_input_option="USER_ENTERED")
+
+        return aba, nome_aba
     except json.JSONDecodeError as je:
         raise RuntimeError(
             f"O conteúdo de GOOGLE_CREDENTIALS_JSON não é um JSON válido (verifique se colou o arquivo inteiro começando com '{{'): {str(je)}"
@@ -314,6 +377,11 @@ def extrair_nome_remetente(usuario: dict) -> str:
     return str(usuario.get("id", "Não identificado"))
 
 
+@app.get("/")
+async def health_check():
+    return {"status": "online", "service": "FinBot OCR Telegram Webhook"}
+
+
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     try:
@@ -351,6 +419,8 @@ async def telegram_webhook(request: Request):
             dados["file_id"] = file_id
 
             # Salva dados extraídos temporariamente em memória usando o estado_id curto
+            nome_aba_prevista = obter_nome_aba_mes(dados.get("data", ""))
+            dados["aba_mes"] = nome_aba_prevista
             DADOS_TEMPORARIOS[estado_id] = dados
 
             obs_text = f"\n• *Observação:* {caption}" if caption else ""
@@ -358,7 +428,7 @@ async def telegram_webhook(request: Request):
                 f"🧾 *Leitura do Recibo Concluída!*\n\n"
                 f"• *Responsável:* {responsavel}\n"
                 f"• *Local:* {dados.get('estabelecimento')}\n"
-                f"• *Data:* {dados.get('data')}\n"
+                f"• *Data:* {dados.get('data')} _(Aba: {nome_aba_prevista})_\n"
                 f"• *Valor:* R$ {dados.get('valor'):.2f}\n"
                 f"• *Pagamento:* {dados.get('pagamento')}"
                 f"{obs_text}\n\n"
@@ -384,11 +454,12 @@ async def telegram_webhook(request: Request):
 
             if dados:
                 dados["categoria"] = categoria
+                # Caso não tenha responsável salvo (fallback), pega quem clicou no botão
                 if not dados.get("responsavel"):
                     dados["responsavel"] = extrair_nome_remetente(callback.get("from", {}))
 
                 try:
-                    planilha = obter_planilha()
+                    planilha_aba, nome_aba = obter_planilha(dados.get("data", ""))
                     # Colunas: [Data, Estabelecimento, Valor, Categoria, Forma de Pagamento, Observações, Responsável]
                     linha = [
                         dados.get("data", ""),
@@ -399,9 +470,12 @@ async def telegram_webhook(request: Request):
                         dados.get("observacoes", ""),
                         dados.get("responsavel", "")
                     ]
-                    planilha.append_row(linha, value_input_option="USER_ENTERED")
+                    planilha_aba.append_row(linha, value_input_option="USER_ENTERED")
 
-                    responder_callback_query(callback_id, f"Categoria '{categoria}' selecionada!")
+                    responder_callback_query(
+                        callback_id,
+                        f"Salvo na aba '{nome_aba}' ({categoria})!"
+                    )
 
                     obs_text = (
                         f"\n• *Observação:* {dados.get('observacoes')}"
@@ -410,6 +484,7 @@ async def telegram_webhook(request: Request):
                     )
                     msg_sucesso = (
                         f"✅ *Gasto Registrado no Google Sheets!*\n\n"
+                        f"• *Aba do Mês:* {nome_aba}\n"
                         f"• *Responsável:* {dados.get('responsavel')}\n"
                         f"• *Local:* {dados.get('estabelecimento')}\n"
                         f"• *Data:* {dados.get('data')}\n"
