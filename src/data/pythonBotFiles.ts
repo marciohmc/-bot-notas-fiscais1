@@ -28,6 +28,7 @@ export interface SheetRow {
   categoria: CategoriaGasto;
   forma_pagamento: string;
   observacoes: string;
+  responsavel: string;
   token_origem: string;
 }
 
@@ -114,6 +115,7 @@ export const INITIAL_SHEET_ROWS: SheetRow[] = [
     categoria: 'Material',
     forma_pagamento: 'PIX',
     observacoes: 'Cimento e vergalhões obra galpão B',
+    responsavel: 'Carlos Mendes (@carlos_obras)',
     token_origem: 'f82a91c0',
   },
   {
@@ -124,6 +126,7 @@ export const INITIAL_SHEET_ROWS: SheetRow[] = [
     categoria: 'Despesa',
     forma_pagamento: 'Cartão de Débito',
     observacoes: 'Almoço equipe técnica viagem Campinas',
+    responsavel: 'Marcos Silva (@marcos_eng)',
     token_origem: '3b19e7a4',
   },
 ];
@@ -385,6 +388,25 @@ def extrair_dados_recibo(texto: str):
         "pagamento": pagamento
     }
 
+def extrair_nome_remetente(usuario: dict) -> str:
+    """
+    Extrai o nome completo ou @username de quem enviou o comprovante no grupo do Telegram.
+    """
+    if not usuario:
+        return "Não identificado"
+    primeiro_nome = usuario.get("first_name", "").strip()
+    sobrenome = usuario.get("last_name", "").strip()
+    username = usuario.get("username", "").strip()
+
+    nome_completo = f"{primeiro_nome} {sobrenome}".strip()
+    if nome_completo and username:
+        return f"{nome_completo} (@{username})"
+    if nome_completo:
+        return nome_completo
+    if username:
+        return f"@{username}"
+    return str(usuario.get("id", "Não identificado"))
+
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     try:
@@ -397,6 +419,9 @@ async def telegram_webhook(request: Request):
         message = data["message"]
         chat_id = message["chat"]["id"]
         caption = message.get("caption", "")
+        
+        # Identifica quem enviou o comprovante (Coluna Responsável)
+        responsavel = extrair_nome_remetente(message.get("from", {}))
         
         if "photo" in message:
             melhor_foto = message["photo"][-1]
@@ -414,6 +439,7 @@ async def telegram_webhook(request: Request):
             texto_extraido = processar_ocr_space(arquivo_bytes, mime_type=mime_type)
             dados = extrair_dados_recibo(texto_extraido)
             dados["observacoes"] = caption
+            dados["responsavel"] = responsavel
             
             # Salva dados extraídos temporariamente usando o estado_id curto (file_unique_id)
             DADOS_TEMPORARIOS[estado_id] = dados
@@ -421,6 +447,7 @@ async def telegram_webhook(request: Request):
             obs_text = f"\\n• *Observação:* {caption}" if caption else ""
             msg_prompt = (
                 f"🧾 *Leitura do Recibo Concluída!*\\n\\n"
+                f"• *Responsável:* {responsavel}\\n"
                 f"• *Local:* {dados.get('estabelecimento')}\\n"
                 f"• *Data:* {dados.get('data')}\\n"
                 f"• *Valor:* R$ {dados.get('valor'):.2f}\\n"
@@ -448,16 +475,20 @@ async def telegram_webhook(request: Request):
             
             if dados:
                 dados["categoria"] = categoria
+                if not dados.get("responsavel"):
+                    dados["responsavel"] = extrair_nome_remetente(callback.get("from", {}))
                 
                 try:
                     planilha = obter_planilha()
+                    # Colunas: [Data, Estabelecimento, Valor, Categoria, Forma de Pagamento, Observações, Responsável]
                     linha = [
                         dados.get("data", ""),
                         dados.get("estabelecimento", ""),
                         dados.get("valor", 0.0),
                         dados.get("categoria", ""),
                         dados.get("pagamento", ""),
-                        dados.get("observacoes", "")
+                        dados.get("observacoes", ""),
+                        dados.get("responsavel", "")
                     ]
                     planilha.append_row(linha, value_input_option="USER_ENTERED")
                     
@@ -466,6 +497,7 @@ async def telegram_webhook(request: Request):
                     obs_text = f"\\n• *Observação:* {dados.get('observacoes')}" if dados.get('observacoes') else ""
                     msg_sucesso = (
                         f"✅ *Gasto Registrado no Google Sheets!*\\n\\n"
+                        f"• *Responsável:* {dados.get('responsavel')}\\n"
                         f"• *Local:* {dados.get('estabelecimento')}\\n"
                         f"• *Data:* {dados.get('data')}\\n"
                         f"• *Valor:* R$ {dados.get('valor'):.2f}\\n"

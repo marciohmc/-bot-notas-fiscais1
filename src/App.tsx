@@ -40,6 +40,7 @@ interface PendingTelegramState extends ParsedReceiptData {
   mimeType: string;
   sizeKb: number;
   ocrEngine: '2' | '3';
+  responsavel: string;
 }
 
 interface ChatMessage {
@@ -48,6 +49,7 @@ interface ChatMessage {
   timestamp: string;
   title?: string;
   caption?: string;
+  responsavel?: string;
   fileType?: string;
   sizeKb?: number;
   text: string;
@@ -65,6 +67,7 @@ export default function App() {
   // Simulador OCR.space + Telegram State
   const [selectedSampleId, setSelectedSampleId] = useState<string>(RECEIPT_SAMPLES[0].id);
   const [customCaption, setCustomCaption] = useState<string>(RECEIPT_SAMPLES[0].caption);
+  const [customResponsavel, setCustomResponsavel] = useState<string>('João Oliveira (@joao_frota)');
   const [selectedEngine, setSelectedEngine] = useState<'2' | '3'>('2');
   const [realOcrKey, setRealOcrKey] = useState<string>('');
   const [isProcessingOcr, setIsProcessingOcr] = useState<boolean>(false);
@@ -85,6 +88,7 @@ export default function App() {
       valor: '461,90',
       forma_pagamento: 'Cartão de Débito',
       observacoes: 'Abastecimento frota caminhão placa ABC-1234',
+      responsavel: 'João Oliveira (@joao_frota)',
       texto_bruto: RECEIPT_SAMPLES[0].rawText,
     },
   });
@@ -97,6 +101,7 @@ export default function App() {
       timestamp: '11:35:10',
       title: 'Cupom Fiscal — Posto Avenida (Combustível)',
       caption: 'Abastecimento frota caminhão placa ABC-1234',
+      responsavel: 'João Oliveira (@joao_frota)',
       fileType: 'image/jpeg',
       sizeKb: 384,
       text: 'Enviou um comprovante no grupo Financeiro Obras',
@@ -138,6 +143,7 @@ export default function App() {
     const now = new Date();
     const timeStr = now.toTimeString().slice(0, 8);
     const userMsgId = `msg-u-${Date.now()}`;
+    const remetente = customResponsavel.trim() || 'Usuário Telegram';
 
     const newUserMsg: ChatMessage = {
       id: userMsgId,
@@ -145,6 +151,7 @@ export default function App() {
       timestamp: timeStr,
       title: sample.title,
       caption: customCaption,
+      responsavel: remetente,
       fileType: sample.type,
       sizeKb: sample.sizeKb,
       text: `Arquivo enviado (${sample.type})`,
@@ -178,6 +185,7 @@ export default function App() {
         mimeType: sample.type,
         sizeKb: sample.sizeKb,
         ocrEngine: selectedEngine,
+        responsavel: remetente,
       };
 
       setDadosTemporarios((prev) => ({
@@ -205,6 +213,7 @@ export default function App() {
     const sizeKb = Math.round(file.size / 1024);
     const mimeType = file.type || 'image/jpeg';
     const nowStr = new Date().toTimeString().slice(0, 8);
+    const remetente = customResponsavel.trim() || 'Usuário Telegram';
 
     const reader = new FileReader();
     reader.onload = async () => {
@@ -217,6 +226,7 @@ export default function App() {
         timestamp: nowStr,
         title: file.name,
         caption: customCaption || 'Recibo enviado via upload local',
+        responsavel: remetente,
         fileType: mimeType,
         sizeKb,
         text: `Upload de arquivo real: ${file.name}`,
@@ -296,6 +306,7 @@ export default function App() {
           mimeType,
           sizeKb,
           ocrEngine: selectedEngine,
+          responsavel: remetente,
         },
       }));
 
@@ -325,6 +336,7 @@ export default function App() {
       categoria,
       forma_pagamento: pending.forma_pagamento,
       observacoes: pending.observacoes,
+      responsavel: pending.responsavel,
       token_origem: token,
     };
 
@@ -395,6 +407,7 @@ export default function App() {
       'Categoria',
       'Forma de Pagamento',
       'Observacoes',
+      'Responsavel',
     ];
     const rows = sheetRows.map((r) => [
       r.data,
@@ -403,6 +416,7 @@ export default function App() {
       r.categoria,
       r.forma_pagamento,
       `"${r.observacoes.replace(/"/g, '""')}"`,
+      `"${r.responsavel.replace(/"/g, '""')}"`,
     ]);
     const csvContent = [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
     handleDownloadFile('planilha_gastos_telegram_ocr.csv', csvContent, 'text/csv');
@@ -415,6 +429,7 @@ export default function App() {
         !sheetSearch.trim() ||
         row.estabelecimento.toLowerCase().includes(sheetSearch.toLowerCase()) ||
         row.observacoes.toLowerCase().includes(sheetSearch.toLowerCase()) ||
+        row.responsavel.toLowerCase().includes(sheetSearch.toLowerCase()) ||
         row.forma_pagamento.toLowerCase().includes(sheetSearch.toLowerCase());
       return matchesCat && matchesQuery;
     });
@@ -626,6 +641,20 @@ export default function App() {
                   </select>
                 </div>
 
+                {/* Remetente no Telegram (Coluna Responsável) */}
+                <div className="space-y-2">
+                  <label className="block text-xs font-semibold text-slate-700">
+                    Quem enviou no Telegram (message.from → Coluna Responsável)
+                  </label>
+                  <input
+                    type="text"
+                    value={customResponsavel}
+                    onChange={(e) => setCustomResponsavel(e.target.value)}
+                    placeholder="Ex: João Oliveira (@joao_frota)"
+                    className="w-full px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:border-blue-600"
+                  />
+                </div>
+
                 {/* Legenda enviada junto com a foto no grupo do Telegram */}
                 <div className="space-y-2">
                   <label className="block text-xs font-semibold text-slate-700">
@@ -769,7 +798,7 @@ export default function App() {
                         <div key={msg.id} className="flex justify-end">
                           <div className="max-w-md w-full bg-blue-600 text-white rounded-xl p-4 space-y-2">
                             <div className="flex items-center justify-between text-xs text-blue-100">
-                              <span>Você · Grupo Financeiro</span>
+                              <span>{msg.responsavel || 'Você'} · Grupo Financeiro</span>
                               <span className="font-mono tabular-nums">{msg.timestamp}</span>
                             </div>
                             <div className="p-2.5 bg-blue-700/80 rounded-lg text-xs font-mono flex items-center justify-between">
@@ -809,6 +838,12 @@ export default function App() {
                             <>
                               <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-1.5 font-mono">
                                 <div>
+                                  <span className="text-slate-500">Responsável:</span>{' '}
+                                  <span className="font-semibold text-blue-700">
+                                    {pendingData.responsavel}
+                                  </span>
+                                </div>
+                                <div>
                                   <span className="text-slate-500">Data:</span>{' '}
                                   <span className="font-semibold text-slate-900 tabular-nums">
                                     {pendingData.data}
@@ -841,7 +876,7 @@ export default function App() {
                               {/* Teclado Inline do Telegram (InlineKeyboardMarkup) */}
                               <div className="space-y-1.5 pt-1">
                                 <p className="text-[11px] font-medium text-slate-500">
-                                  Teclado Inline (callback_data = &quot;cat|{pendingData.token}|...&quot;):
+                                  Teclado Inline (callback_data = &quot;cat|Categoria|{pendingData.token}&quot;):
                                 </p>
                                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
                                   {CATEGORIAS_GASTO.map((cat) => (
@@ -930,7 +965,7 @@ export default function App() {
                       4. Espelho Google Sheets (sheet.append_row via gspread)
                     </h3>
                     <p className="text-xs text-slate-500">
-                      Colunas: Data · Estabelecimento · Valor · Categoria · Forma de Pagamento · Observações
+                      Colunas: Data · Estabelecimento · Valor · Categoria · Pagamento · Observações · Responsável
                     </p>
                   </div>
                   <button
@@ -953,6 +988,7 @@ export default function App() {
                         <th className="py-2.5 px-3">Categoria</th>
                         <th className="py-2.5 px-3">Pagamento</th>
                         <th className="py-2.5 px-3">Observações</th>
+                        <th className="py-2.5 px-3">Responsável</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200 text-xs">
@@ -961,7 +997,7 @@ export default function App() {
                           <td className="py-2.5 px-3 font-mono tabular-nums text-slate-600 whitespace-nowrap">
                             {row.data}
                           </td>
-                          <td className="py-2.5 px-3 font-medium text-slate-900 max-w-[180px] truncate">
+                          <td className="py-2.5 px-3 font-medium text-slate-900 max-w-[160px] truncate">
                             {row.estabelecimento}
                           </td>
                           <td className="py-2.5 px-3 font-mono tabular-nums font-semibold text-slate-900 text-right whitespace-nowrap">
@@ -973,8 +1009,11 @@ export default function App() {
                           <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">
                             {row.forma_pagamento}
                           </td>
-                          <td className="py-2.5 px-3 text-slate-500 max-w-[200px] truncate">
+                          <td className="py-2.5 px-3 text-slate-500 max-w-[160px] truncate">
                             {row.observacoes}
+                          </td>
+                          <td className="py-2.5 px-3 font-medium text-blue-700 whitespace-nowrap">
+                            {row.responsavel}
                           </td>
                         </tr>
                       ))}
@@ -1094,7 +1133,7 @@ export default function App() {
                       type="text"
                       value={sheetSearch}
                       onChange={(e) => setSheetSearch(e.target.value)}
-                      placeholder="Buscar estabelecimento ou obs..."
+                      placeholder="Buscar local, responsável ou obs..."
                       className="pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:border-blue-600"
                     />
                   </div>
@@ -1139,13 +1178,14 @@ export default function App() {
                       <th className="py-3 px-4">Categoria</th>
                       <th className="py-3 px-4">Forma de Pagamento</th>
                       <th className="py-3 px-4">Observações (Legenda)</th>
+                      <th className="py-3 px-4">Responsável</th>
                       <th className="py-3 px-4 text-right">Ação</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200 text-xs">
                     {filteredSheetRows.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="py-8 text-center text-slate-500">
+                        <td colSpan={8} className="py-8 text-center text-slate-500">
                           Nenhum lançamento encontrado para este filtro. Simule um novo recibo na aba{' '}
                           <button
                             type="button"
@@ -1176,6 +1216,9 @@ export default function App() {
                             {row.forma_pagamento}
                           </td>
                           <td className="py-3 px-4 text-slate-600">{row.observacoes}</td>
+                          <td className="py-3 px-4 font-medium text-blue-700 whitespace-nowrap">
+                            {row.responsavel}
+                          </td>
                           <td className="py-3 px-4 text-right whitespace-nowrap">
                             <button
                               type="button"
