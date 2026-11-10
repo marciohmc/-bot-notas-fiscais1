@@ -104,6 +104,24 @@ VALOR TOTAL: 1.120,00
 CONDICAO DE PAGAMENTO: CARTAO DE CREDITO 2X`,
   },
   {
+    id: 'duplicado-madeireira',
+    title: 'Teste de Duplicidade — Madeireira São Jorge (Já consta na Aba 11-2026)',
+    type: 'image/jpeg',
+    sizeKb: 410,
+    caption: 'Reenvio acidental da nota de cimento galpão B',
+    ocrEngine: '2',
+    filePathTelegram: 'photos/file_84101_madeireira.jpg',
+    rawText: `MADEIREIRA E MATERIAIS SAO JORGE
+CNPJ: 45.118.902/0001-10
+DATA DE EMISSAO: 07/11/2026
+----------------------------------------
+NOTA FISCAL ELETRONICA
+ITEM 01 SACOS DE CIMENTO CP-II   R$ 890,00
+----------------------------------------
+VALOR TOTAL R$ 890,00
+FORMA DE PAGAMENTO: PIX`,
+  },
+  {
     id: 'arquivo-grande-erro',
     title: 'Teste de Limite (> 1 MB) — PDF Alta Resolução',
     type: 'application/pdf',
@@ -170,11 +188,12 @@ export const SHEETS_SERVICE_CODE = `import os
 import json
 import re
 import base64
+import unicodedata
 import logging
 import gspread
 from google.oauth2.service_account import Credentials
 
-logger = logging.getLogger("FinBotOCR")
+logger = logging.getLogger("FinBotOCR.SheetsService")
 
 CABECALHOS_PADRAO = [
     "Date",
@@ -233,26 +252,150 @@ def get_sheets_client():
     return gspread.authorize(creds)
 
 
+def normalizar_texto(texto: str) -> str:
+    """
+    Remove acentos, espaços extras e converte para maiúsculas para comparação
+    confiável de nomes de estabelecimentos.
+    """
+    if not texto:
+        return ""
+    sem_acentos = "".join(
+        c for c in unicodedata.normalize("NFD", str(texto))
+        if unicodedata.category(c) != "Mn"
+    )
+    limpo = re.sub(r"\\s+", " ", sem_acentos).strip().upper()
+    return limpo
+
+
+def normalizar_data(data_str: str) -> str:
+    """
+    Padroniza datas como '5/11/2026' ou '05/11/26' para '05/11/2026'.
+    """
+    if not data_str:
+        return ""
+    match = re.search(r"\\b(\\d{1,2})/(\\d{1,2})/(\\d{2,4})\\b", str(data_str).strip())
+    if match:
+        dia = match.group(1).zfill(2)
+        mes = match.group(2).zfill(2)
+        ano = match.group(3)
+        if len(ano) == 2:
+            ano = f"20{ano}"
+        return f"{dia}/{mes}/{ano}"
+    return str(data_str).strip()
+
+
+def normalizar_valor_float(valor) -> float:
+    """
+    Converte qualquer formato monetário ('R$ 1.120,50', '461,90', '461.9', 461.9)
+    em float arredondado com 2 casas decimais para evitar falhas na checagem de duplicados.
+    """
+    if isinstance(valor, (int, float)):
+        return round(float(valor), 2)
+
+    s = str(valor or "").replace("R$", "").replace(" ", "").strip()
+    if not s:
+        return 0.0
+
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        s = s.replace(",", ".")
+
+    try:
+        return round(float(s), 2)
+    except ValueError:
+        return 0.0
+
+
 def extrair_aba_mes_ano(data_str: str) -> str:
     """
     Extrai o mês e ano da data do recibo (Formato esperado: DD/MM/AAAA)
     retornando no padrão MM-AAAA (ex: '11-2026').
     """
-    if data_str:
-        match = re.search(r"\\b(\\d{2})/(\\d{2})/(\\d{2,4})\\b", str(data_str))
-        if match:
-            mes = match.group(2)
-            ano = match.group(3)
-            if len(ano) == 2:
-                ano = f"20{ano}"
-            return f"{mes}-{ano}"
-
-    partes = str(data_str).split("/")
+    data_norm = normalizar_data(data_str)
+    partes = data_norm.split("/")
     if len(partes) == 3:
-        ano = partes[2] if len(partes[2]) == 4 else f"20{partes[2]}"
-        return f"{partes[1]}-{ano}"
-
+        return f"{partes[1]}-{partes[2]}"
     return "Geral"
+
+
+def verificar_duplicidade_na_aba(
+    worksheet,
+    data_alvo: str,
+    estabelecimento_alvo: str,
+    valor_alvo: float,
+    file_url_alvo: str = ""
+) -> dict:
+    """
+    Verifica na aba do Google Sheets se o comprovante já foi lançado anteriormente.
+    Compara:
+      1) Se o mesmo link de arquivo do Telegram (file_url) já foi gravado na coluna Receipt Link; OU
+      2) Se já existe registro com mesma Data + mesmo Estabelecimento + mesmo Valor (em centavos).
+    Retorna {"duplicado": bool, "linha": int, "responsavel_anterior": str, "motivo": str}.
+    """
+    try:
+        linhas_valores = worksheet.get_all_values()
+        if len(linhas_valores) <= 1:
+            return {"duplicado": False}
+
+        try:
+            linhas_formulas = worksheet.get_all_values(value_render_option="FORMULA")
+        except Exception:
+            linhas_formulas = linhas_valores
+
+        data_norm_alvo = normalizar_data(data_alvo)
+        estab_norm_alvo = normalizar_texto(estabelecimento_alvo)
+        valor_float_alvo = normalizar_valor_float(valor_alvo)
+
+        trecho_arquivo = ""
+        if file_url_alvo and "/" in file_url_alvo:
+            partes_url = file_url_alvo.split("/")
+            trecho_arquivo = "/".join(partes_url[-2:]) if len(partes_url) >= 2 else partes_url[-1]
+
+        for idx in range(1, len(linhas_valores)):
+            linha = linhas_valores[idx]
+            linha_form = linhas_formulas[idx] if idx < len(linhas_formulas) else linha
+
+            data_planilha = normalizar_data(linha[0] if len(linha) > 0 else "")
+            estab_planilha = normalizar_texto(linha[1] if len(linha) > 1 else "")
+            valor_planilha = normalizar_valor_float(linha[5] if len(linha) > 5 else 0.0)
+            resp_planilha = (linha[6] if len(linha) > 6 else "Outro usuário").strip()
+            celula_link_formula = str(linha_form[7] if len(linha_form) > 7 else "")
+
+            # Critério 1: Mesmo link/arquivo do Telegram na coluna Receipt Link
+            if trecho_arquivo and trecho_arquivo in celula_link_formula:
+                return {
+                    "duplicado": True,
+                    "linha": idx + 1,
+                    "responsavel_anterior": resp_planilha,
+                    "motivo": f"O mesmo arquivo do Telegram já foi registrado na linha {idx + 1} por {resp_planilha}."
+                }
+
+            # Critério 2: Mesma Data + Mesmo Estabelecimento + Mesmo Valor (diferença < R$ 0,01)
+            if (
+                data_planilha == data_norm_alvo
+                and estab_planilha == estab_norm_alvo
+                and abs(valor_planilha - valor_float_alvo) < 0.01
+            ):
+                return {
+                    "duplicado": True,
+                    "linha": idx + 1,
+                    "responsavel_anterior": resp_planilha,
+                    "motivo": (
+                        f"Comprovante idêntico (Data: {data_norm_alvo}, Local: {estabelecimento_alvo}, "
+                        f"Valor: R$ {valor_float_alvo:.2f}) já consta na linha {idx + 1} "
+                        f"(enviado por {resp_planilha})."
+                    )
+                }
+
+        return {"duplicado": False}
+
+    except Exception as e:
+        logger.warning(f"Aviso ao verificar duplicidade na planilha: {e}")
+        return {"duplicado": False}
 
 
 def salvar_na_planilha(
@@ -264,7 +407,7 @@ def salvar_na_planilha(
     """
     Insere os dados extraídos na aba correspondente ao mês/ano da despesa (ex: 11-2026),
     adicionando o link oficial do Telegram formatado como hiperlink clicável na planilha
-    e verificando duplicidade antes de inserir.
+    e bloqueando registros duplicados antes de inserir.
     """
     try:
         sheet_id = (
@@ -279,57 +422,57 @@ def salvar_na_planilha(
         client = get_sheets_client()
         spreadsheet = client.open_by_key(sheet_id)
 
-        # Extrai o mês e ano da data do recibo (Ex: 11-2026)
-        data_str = dados_extracao.get("data", "")
-        mes_ano = extrair_aba_mes_ano(data_str)
+        data_formatada = normalizar_data(dados_extracao.get("data", ""))
+        mes_ano = extrair_aba_mes_ano(data_formatada)
+        estabelecimento = dados_extracao.get("estabelecimento", "Desconhecido").strip()
+        valor_numerico = normalizar_valor_float(dados_extracao.get("valor", 0.0))
 
-        # Abre ou cria a aba do mês correspondente
         try:
             worksheet = spreadsheet.worksheet(mes_ano)
+            primeira_linha = worksheet.row_values(1)
+            if not primeira_linha:
+                worksheet.append_row(CABECALHOS_PADRAO, value_input_option="USER_ENTERED")
         except gspread.exceptions.WorksheetNotFound:
             worksheet = spreadsheet.add_worksheet(title=mes_ano, rows=1000, cols=10)
             worksheet.append_row(CABECALHOS_PADRAO, value_input_option="USER_ENTERED")
 
-        # Formata o link do Telegram utilizando a fórmula oficial do Google Sheets
-        # Isso transforma o texto da célula em um botão clicável "Ver Comprovante"
+        # Checagem rigorosa de duplicidade antes de gravar
+        checagem = verificar_duplicidade_na_aba(
+            worksheet=worksheet,
+            data_alvo=data_formatada,
+            estabelecimento_alvo=estabelecimento,
+            valor_alvo=valor_numerico,
+            file_url_alvo=file_url
+        )
+
+        if checagem.get("duplicado"):
+            return {
+                "sucesso": False,
+                "duplicado": True,
+                "aba": mes_ano,
+                "linha_duplicada": checagem.get("linha"),
+                "responsavel_anterior": checagem.get("responsavel_anterior"),
+                "erro": checagem.get("motivo")
+            }
+
         formula_hyperlink = (
             f'=HYPERLINK("{file_url}"; "Ver Comprovante")'
             if file_url
             else "Sem link"
         )
 
-        # Prepara a linha a ser inserida (9 colunas)
         row_data = [
-            dados_extracao.get("data", ""),
-            dados_extracao.get("estabelecimento", ""),
-            dados_extracao.get("tipo_documento", "Recibo"),
+            data_formatada,
+            estabelecimento,
+            dados_extracao.get("tipo_documento", "Recibo/Cupom"),
             dados_extracao.get("categoria", ""),
             dados_extracao.get("pagamento", "Outros"),
-            dados_extracao.get("valor", 0.0),
+            valor_numerico,
             sender_name,
-            formula_hyperlink,  # <--- Insere a fórmula do link clicável aqui
+            formula_hyperlink,
             caption or ""
         ]
 
-        # Verifica duplicidade simples (mesma Data, Estabelecimento e Valor)
-        try:
-            registros_existentes = worksheet.get_all_records()
-            for reg in registros_existentes:
-                if (
-                    str(reg.get("Date", "")).strip() == str(row_data[0]).strip()
-                    and str(reg.get("Establishment", "")).strip() == str(row_data[1]).strip()
-                    and str(reg.get("Value", "")).replace("R$", "").strip() == str(row_data[5]).strip()
-                ):
-                    return {
-                        "sucesso": False,
-                        "duplicado": True,
-                        "aba": mes_ano,
-                        "erro": "Este comprovante já foi registrado anteriormente nesta aba."
-                    }
-        except Exception as dup_err:
-            logger.warning(f"Aviso ao verificar duplicidade: {dup_err}")
-
-        # IMPORTANTE: value_input_option='USER_ENTERED' faz o Google Planilhas interpretar a fórmula =HYPERLINK
         worksheet.append_row(row_data, value_input_option="USER_ENTERED")
         return {
             "sucesso": True,
@@ -355,12 +498,21 @@ from typing import Tuple
 from fastapi import FastAPI, Request
 import requests
 
-from sheets_service import salvar_na_planilha, extrair_aba_mes_ano
+from sheets_service import (
+    salvar_na_planilha,
+    extrair_aba_mes_ano,
+    normalizar_data,
+    normalizar_texto,
+    normalizar_valor_float,
+)
 
 app = FastAPI(title="Meu Bot de Finanças — Telegram + OCR.space + Google Sheets")
 
 # Armazenamento temporário em memória para dados de recibos aguardando categoria
 DADOS_TEMPORARIOS = {}
+
+# Cache rápido em memória de comprovantes já salvos na sessão
+COMPROVANTES_PROCESSADOS = set()
 
 
 # 1. Função para enviar mensagem com botões de seleção de categoria (Inline Keyboard)
@@ -431,11 +583,6 @@ def responder_callback_query(callback_query_id: str, texto: str):
 
 # 4. Passo 2 e 3: Consultar getFile no Telegram, montar a URL Oficial e baixar os bytes
 def baixar_arquivo_telegram(file_id: str) -> Tuple[bytes, str]:
-    """
-    Consulta https://api.telegram.org/bot<TOKEN>/getFile?file_id=<ID>,
-    monta o link oficial permanente https://api.telegram.org/file/bot<TOKEN>/<file_path>
-    e retorna (conteudo_bytes, file_url).
-    """
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     try:
         res_info = requests.get(
@@ -528,21 +675,13 @@ def extrair_dados_recibo(texto: str):
     linhas = [l.strip() for l in texto.split("\\n") if l.strip()]
     estabelecimento = linhas[0] if linhas else "Desconhecido"
 
-    match_data = re.search(r"\\b\\d{2}/\\d{2}/\\d{2,4}\\b", texto)
-    data = match_data.group(0) if match_data else datetime.now().strftime("%d/%m/%Y")
+    match_data = re.search(r"\\b\\d{1,2}/\\d{1,2}/\\d{2,4}\\b", texto)
+    data = normalizar_data(match_data.group(0)) if match_data else datetime.now().strftime("%d/%m/%Y")
 
     valores = re.findall(r"\\b(?:\\d{1,3}(?:\\.\\d{3})*|\\d+)[\\.,]\\d{2}\\b", texto)
     valor = 0.0
     if valores:
-        try:
-            ultimo_valor = valores[-1]
-            if "," in ultimo_valor and "." in ultimo_valor:
-                ultimo_valor = ultimo_valor.replace(".", "").replace(",", ".")
-            else:
-                ultimo_valor = ultimo_valor.replace(",", ".")
-            valor = float(ultimo_valor)
-        except ValueError:
-            valor = 0.0
+        valor = normalizar_valor_float(valores[-1])
 
     texto_upper = texto.upper()
     if "PIX" in texto_upper:
@@ -614,8 +753,14 @@ async def telegram_webhook(request: Request):
             estado_id = doc.get("file_unique_id", file_id[:20])
             mime_type = doc.get("mime_type", "application/pdf")
 
+        if estado_id in COMPROVANTES_PROCESSADOS:
+            enviar_mensagem_telegram(
+                chat_id,
+                "⚠️ *Arquivo Duplicado:* Esta mesma imagem/PDF já foi processada e salva anteriormente na planilha."
+            )
+            return {"status": "duplicate_file_ignored"}
+
         try:
-            # Passo 2 e 3: Baixa os bytes e obtém o file_url oficial do Telegram
             arquivo_bytes, file_url = baixar_arquivo_telegram(file_id)
             texto_extraido = processar_ocr_space(arquivo_bytes, mime_type=mime_type)
             dados = extrair_dados_recibo(texto_extraido)
@@ -665,6 +810,12 @@ async def telegram_webhook(request: Request):
                 caption = dados.get("observacoes", "")
                 file_url = dados.get("file_url", "")
 
+                chave_assinatura = (
+                    normalizar_data(dados.get("data", "")),
+                    normalizar_texto(dados.get("estabelecimento", "")),
+                    normalizar_valor_float(dados.get("valor", 0.0))
+                )
+
                 resultado = salvar_na_planilha(
                     dados_extracao=dados,
                     sender_name=sender_name,
@@ -673,6 +824,8 @@ async def telegram_webhook(request: Request):
                 )
 
                 if resultado.get("sucesso"):
+                    COMPROVANTES_PROCESSADOS.add(estado_id)
+                    COMPROVANTES_PROCESSADOS.add(chave_assinatura)
                     aba_salva = resultado.get("aba", "Geral")
                     responder_callback_query(
                         callback_id,
@@ -695,10 +848,14 @@ async def telegram_webhook(request: Request):
                     )
                     enviar_mensagem_telegram(chat_id, msg_sucesso)
                 elif resultado.get("duplicado"):
-                    responder_callback_query(callback_id, "Comprovante duplicado!")
+                    responder_callback_query(callback_id, "⚠️ Comprovante duplicado bloqueado!")
+                    motivo = resultado.get("erro") or "Este comprovante já consta na planilha."
                     enviar_mensagem_telegram(
                         chat_id,
-                        f"⚠️ *Registro Duplicado:* Este comprovante já consta na aba *{resultado.get('aba')}*."
+                        f"🚫 *Gravação Bloqueada (Duplicidade Detectada)*\\n\\n"
+                        f"• *Aba Verificada:* {resultado.get('aba')}\\n"
+                        f"• *Motivo:* {motivo}\\n\\n"
+                        f"_O lançamento não foi duplicado na planilha._"
                     )
                 else:
                     DADOS_TEMPORARIOS[estado_id] = dados

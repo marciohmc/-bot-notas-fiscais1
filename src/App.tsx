@@ -7,6 +7,7 @@ import {
   Upload,
   Trash2,
   RefreshCw,
+  AlertTriangle,
   CheckCircle2,
   Terminal,
   Search,
@@ -54,6 +55,7 @@ interface ChatMessage {
   resolvedCategory?: CategoriaGasto;
   resolvedFormula?: string;
   duplicateWarning?: boolean;
+  duplicateDetails?: string;
   cancelled?: boolean;
   isError?: boolean;
 }
@@ -345,14 +347,34 @@ export default function App() {
 
     const formulaHyperlink = `=HYPERLINK("${pending.file_url}"; "Ver Comprovante")`;
 
-    // Verifica duplicidade simples (mesma Data, Estabelecimento e Valor na mesma aba)
-    const isDuplicate = sheetRows.some(
+    // Funções de normalização idênticas ao sheets_service.py
+    const normText = (s: string) =>
+      s
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toUpperCase();
+
+    const normFloat = (v: string) => {
+      const cleaned = v.replace(/R\$/g, '').replace(/\./g, '').replace(',', '.').trim();
+      const parsed = parseFloat(cleaned);
+      return isNaN(parsed) ? 0 : Math.round(parsed * 100) / 100;
+    };
+
+    const existingDuplicate = sheetRows.find(
       (r) =>
         r.aba_mes === pending.aba_mes &&
-        r.data === pending.data &&
-        r.estabelecimento === pending.estabelecimento &&
-        r.valor === pending.valor
+        (r.file_url === pending.file_url ||
+          (r.data.trim() === pending.data.trim() &&
+            normText(r.estabelecimento) === normText(pending.estabelecimento) &&
+            Math.abs(normFloat(r.valor) - normFloat(pending.valor)) < 0.01))
     );
+
+    const isDuplicate = Boolean(existingDuplicate);
+    const duplicateDetails = existingDuplicate
+      ? `Comprovante idêntico (${pending.estabelecimento} · R$ ${pending.valor} em ${pending.data}) já foi lançado na aba [${pending.aba_mes}] por ${existingDuplicate.responsavel}.`
+      : undefined;
 
     if (!isDuplicate) {
       const newRow: SheetRow = {
@@ -390,6 +412,7 @@ export default function App() {
               resolvedCategory: categoria,
               resolvedFormula: formulaHyperlink,
               duplicateWarning: isDuplicate,
+              duplicateDetails,
             }
           : m
       )
@@ -969,16 +992,14 @@ export default function App() {
                           )}
 
                           {/* Estado após escolha de categoria (editMessageText) */}
-                          {msg.resolvedCategory && (
+                          {msg.resolvedCategory && !msg.duplicateWarning && (
                             <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-900 space-y-1.5">
                               <div className="flex items-center justify-between">
                                 <div className="flex items-center gap-2">
                                   <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
                                   <span>
-                                    {msg.duplicateWarning
-                                      ? 'Comprovante idêntico já constava na aba (duplicidade evitada) · Categoria '
-                                      : 'Salvo via sheets_service.py na categoria '}
-                                    <strong className="font-bold">{msg.resolvedCategory}</strong>!
+                                    Salvo via <code className="font-mono">sheets_service.py</code> na
+                                    categoria <strong className="font-bold">{msg.resolvedCategory}</strong>!
                                   </span>
                                 </div>
                                 <span className="font-mono text-[11px] text-emerald-700">
@@ -990,6 +1011,26 @@ export default function App() {
                                   Fórmula gravada: {msg.resolvedFormula}
                                 </p>
                               )}
+                            </div>
+                          )}
+
+                          {/* Estado quando duplicidade é bloqueada por verificar_duplicidade_na_aba */}
+                          {msg.resolvedCategory && msg.duplicateWarning && (
+                            <div className="p-3 bg-amber-50 border border-amber-300 rounded-lg text-xs text-amber-950 space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                                  <strong className="font-bold">
+                                    Gravação Bloqueada (Duplicidade Detectada)
+                                  </strong>
+                                </div>
+                                <span className="font-mono text-[11px] text-amber-800">
+                                  DUPLICADO
+                                </span>
+                              </div>
+                              <p className="text-amber-900 leading-relaxed">
+                                {msg.duplicateDetails}
+                              </p>
                             </div>
                           )}
 

@@ -6,13 +6,22 @@ from typing import Tuple
 from fastapi import FastAPI, Request
 import requests
 
-from sheets_service import salvar_na_planilha, extrair_aba_mes_ano
+from sheets_service import (
+    salvar_na_planilha,
+    extrair_aba_mes_ano,
+    normalizar_data,
+    normalizar_texto,
+    normalizar_valor_float,
+)
 
 app = FastAPI(title="Meu Bot de Finanças — Telegram + OCR.space + Google Sheets")
 
 # Armazenamento temporário em memória para dados de recibos aguardando categoria
 # Chave: estado_id (file_unique_id curto, seguro para o limite de 64 bytes do callback_data do Telegram)
 DADOS_TEMPORARIOS = {}
+
+# Cache rápido em memória de comprovantes já salvos para bloquear reenvios imediatos da mesma mídia
+COMPROVANTES_PROCESSADOS = set()
 
 
 # 1. Função para enviar mensagem com botões de seleção de categoria (Inline Keyboard)
@@ -101,7 +110,6 @@ def baixar_arquivo_telegram(file_id: str) -> Tuple[bytes, str]:
             raise ValueError(f"Erro no getFile do Telegram: {dados_json}")
 
         file_path = dados_json["result"]["file_path"]
-        # Link oficial direto nos servidores do Telegram para usar no =HYPERLINK()
         file_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
 
         response = requests.get(file_url, timeout=30)
@@ -187,21 +195,13 @@ def extrair_dados_recibo(texto: str):
     linhas = [l.strip() for l in texto.split("\n") if l.strip()]
     estabelecimento = linhas[0] if linhas else "Desconhecido"
 
-    match_data = re.search(r"\b\d{2}/\d{2}/\d{2,4}\b", texto)
-    data = match_data.group(0) if match_data else datetime.now().strftime("%d/%m/%Y")
+    match_data = re.search(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", texto)
+    data = normalizar_data(match_data.group(0)) if match_data else datetime.now().strftime("%d/%m/%Y")
 
     valores = re.findall(r"\b(?:\d{1,3}(?:\.\d{3})*|\d+)[\.,]\d{2}\b", texto)
     valor = 0.0
     if valores:
-        try:
-            ultimo_valor = valores[-1]
-            if "," in ultimo_valor and "." in ultimo_valor:
-                ultimo_valor = ultimo_valor.replace(".", "").replace(",", ".")
-            else:
-                ultimo_valor = ultimo_valor.replace(",", ".")
-            valor = float(ultimo_valor)
-        except ValueError:
-            valor = 0.0
+        valor = normalizar_valor_float(valores[-1])
 
     texto_upper = texto.upper()
     if "PIX" in texto_upper:
@@ -278,6 +278,14 @@ async def telegram_webhook(request: Request):
             estado_id = doc.get("file_unique_id", file_id[:20])
             mime_type = doc.get("mime_type", "application/pdf")
 
+        # Checagem rápida se exatamente a mesma mídia já foi processada na sessão
+        if estado_id in COMPROVANTES_PROCESSADOS:
+            enviar_mensagem_telegram(
+                chat_id,
+                "⚠️ *Arquivo Duplicado:* Esta mesma imagem/PDF já foi processada e salva anteriormente na planilha."
+            )
+            return {"status": "duplicate_file_ignored"}
+
         try:
             # Passo 2 e 3: Baixa os bytes e obtém o file_url oficial do Telegram
             arquivo_bytes, file_url = baixar_arquivo_telegram(file_id)
@@ -330,6 +338,12 @@ async def telegram_webhook(request: Request):
                 caption = dados.get("observacoes", "")
                 file_url = dados.get("file_url", "")
 
+                chave_assinatura = (
+                    normalizar_data(dados.get("data", "")),
+                    normalizar_texto(dados.get("estabelecimento", "")),
+                    normalizar_valor_float(dados.get("valor", 0.0))
+                )
+
                 resultado = salvar_na_planilha(
                     dados_extracao=dados,
                     sender_name=sender_name,
@@ -338,6 +352,8 @@ async def telegram_webhook(request: Request):
                 )
 
                 if resultado.get("sucesso"):
+                    COMPROVANTES_PROCESSADOS.add(estado_id)
+                    COMPROVANTES_PROCESSADOS.add(chave_assinatura)
                     aba_salva = resultado.get("aba", "Geral")
                     responder_callback_query(
                         callback_id,
@@ -360,10 +376,14 @@ async def telegram_webhook(request: Request):
                     )
                     enviar_mensagem_telegram(chat_id, msg_sucesso)
                 elif resultado.get("duplicado"):
-                    responder_callback_query(callback_id, "Comprovante duplicado!")
+                    responder_callback_query(callback_id, "⚠️ Comprovante duplicado bloqueado!")
+                    motivo = resultado.get("erro") or "Este comprovante já consta na planilha."
                     enviar_mensagem_telegram(
                         chat_id,
-                        f"⚠️ *Registro Duplicado:* Este comprovante ({dados.get('estabelecimento')} - R$ {dados.get('valor'):.2f} em {dados.get('data')}) já consta na aba *{resultado.get('aba')}*."
+                        f"🚫 *Gravação Bloqueada (Duplicidade Detectada)*\n\n"
+                        f"• *Aba Verificada:* {resultado.get('aba')}\n"
+                        f"• *Motivo:* {motivo}\n\n"
+                        f"_O lançamento não foi duplicado na planilha._"
                     )
                 else:
                     # Restaura os dados em memória para não perder a leitura caso o Google Sheets falhe
