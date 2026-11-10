@@ -1,0 +1,6 @@
+{
+  "name": "FinBot OCR — Telegram & Google Sheets Automation",
+  "description": "Plataforma de engenharia, simulador interativo de OCR.space e código de produção (FastAPI, Telegram Webhook e Google Sheets via gspread) para automação financeira de recibos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
