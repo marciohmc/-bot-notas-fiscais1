@@ -18,7 +18,8 @@ CABECALHOS_PADRAO = [
     "Value",
     "Responsible",
     "Receipt Link",
-    "Obs"
+    "Obs",
+    "OCR Text"
 ]
 
 
@@ -110,7 +111,6 @@ def normalizar_valor_float(valor) -> float:
     if not s:
         return 0.0
 
-    # Caso tenha ponto de milhar e vírgula decimal (ex: 1.120,50)
     if "," in s and "." in s:
         if s.rfind(",") > s.rfind("."):
             s = s.replace(".", "").replace(",", ".")
@@ -123,6 +123,25 @@ def normalizar_valor_float(valor) -> float:
         return round(float(s), 2)
     except ValueError:
         return 0.0
+
+
+def sanitizar_texto_ocr_planilha(texto_ocr: str) -> str:
+    """
+    Prepara o texto bruto retornado pelo OCR.space para ser salvo com segurança em uma
+    célula do Google Sheets usando value_input_option='USER_ENTERED':
+    - Remove quebras de linha excessivas mantendo a leitura limpa
+    - Adiciona apóstrofo inicial caso comece com '=', '+' ou '-' (evita erro #ERROR! de fórmula)
+    - Respeita o limite de caracteres por célula do Google Sheets
+    """
+    if not texto_ocr:
+        return ""
+    linhas = [linha.strip() for linha in str(texto_ocr).splitlines() if linha.strip()]
+    texto_limpo = "\n".join(linhas).strip()
+
+    if texto_limpo.startswith(("=", "+", "-")):
+        texto_limpo = f"'{texto_limpo}"
+
+    return texto_limpo[:49000]
 
 
 def extrair_aba_mes_ano(data_str: str) -> str:
@@ -152,7 +171,6 @@ def verificar_duplicidade_na_aba(
     Retorna {"duplicado": bool, "linha": int, "responsavel_anterior": str, "motivo": str}.
     """
     try:
-        # Busca todas as linhas com valores formatados e também com fórmulas (para ler o =HYPERLINK)
         linhas_valores = worksheet.get_all_values()
         if len(linhas_valores) <= 1:
             return {"duplicado": False}
@@ -166,20 +184,18 @@ def verificar_duplicidade_na_aba(
         estab_norm_alvo = normalizar_texto(estabelecimento_alvo)
         valor_float_alvo = normalizar_valor_float(valor_alvo)
 
-        # Extrai apenas o caminho final do arquivo no Telegram (ex: photos/file_84.jpg)
         trecho_arquivo = ""
         if file_url_alvo and "/" in file_url_alvo:
             partes_url = file_url_alvo.split("/")
             trecho_arquivo = "/".join(partes_url[-2:]) if len(partes_url) >= 2 else partes_url[-1]
 
-        # Percorre a partir da linha 2 (índice 1), pulando o cabeçalho
         for idx in range(1, len(linhas_valores)):
             linha = linhas_valores[idx]
             linha_form = linhas_formulas[idx] if idx < len(linhas_formulas) else linha
 
             # Índices das colunas:
-            # 0: Date | 1: Establishment | 2: Doc Type | 3: Category
-            # 4: Payment | 5: Value | 6: Responsible | 7: Receipt Link | 8: Obs
+            # 0: Date | 1: Establishment | 2: Doc Type | 3: Category | 4: Payment
+            # 5: Value | 6: Responsible | 7: Receipt Link | 8: Obs | 9: OCR Text
             data_planilha = normalizar_data(linha[0] if len(linha) > 0 else "")
             estab_planilha = normalizar_texto(linha[1] if len(linha) > 1 else "")
             valor_planilha = normalizar_valor_float(linha[5] if len(linha) > 5 else 0.0)
@@ -223,12 +239,13 @@ def salvar_na_planilha(
     dados_extracao: dict,
     sender_name: str,
     caption: str,
-    file_url: str
+    file_url: str,
+    texto_ocr: str = ""
 ) -> dict:
     """
     Insere os dados extraídos na aba correspondente ao mês/ano da despesa (ex: 11-2026),
-    adicionando o link oficial do Telegram formatado como hiperlink clicável na planilha
-    e bloqueando registros duplicados antes de inserir.
+    adicionando o link oficial do Telegram formatado como hiperlink clicável,
+    o texto bruto retornado pelo OCR.space (coluna 'OCR Text') e bloqueando duplicados.
     """
     try:
         sheet_id = (
@@ -243,20 +260,22 @@ def salvar_na_planilha(
         client = get_sheets_client()
         spreadsheet = client.open_by_key(sheet_id)
 
-        # Normaliza data e extrai a aba do mês (Ex: 11-2026)
         data_formatada = normalizar_data(dados_extracao.get("data", ""))
         mes_ano = extrair_aba_mes_ano(data_formatada)
         estabelecimento = dados_extracao.get("estabelecimento", "Desconhecido").strip()
         valor_numerico = normalizar_valor_float(dados_extracao.get("valor", 0.0))
 
-        # Abre ou cria a aba do mês correspondente
+        # Abre ou cria a aba do mês correspondente (com 10 colunas incluindo 'OCR Text')
         try:
             worksheet = spreadsheet.worksheet(mes_ano)
             primeira_linha = worksheet.row_values(1)
             if not primeira_linha:
                 worksheet.append_row(CABECALHOS_PADRAO, value_input_option="USER_ENTERED")
+            elif "OCR Text" not in primeira_linha and len(primeira_linha) == 9:
+                # Atualiza automaticamente o cabeçalho da coluna J (10) caso a aba já existisse com 9 colunas
+                worksheet.update_cell(1, 10, "OCR Text")
         except gspread.exceptions.WorksheetNotFound:
-            worksheet = spreadsheet.add_worksheet(title=mes_ano, rows=1000, cols=10)
+            worksheet = spreadsheet.add_worksheet(title=mes_ano, rows=1000, cols=12)
             worksheet.append_row(CABECALHOS_PADRAO, value_input_option="USER_ENTERED")
 
         # Checagem rigorosa de duplicidade antes de gravar
@@ -285,7 +304,11 @@ def salvar_na_planilha(
             else "Sem link"
         )
 
-        # Prepara a linha a ser inserida conforme as 9 colunas especificadas
+        # Obtém e sanitiza o texto bruto retornado pelo OCR.space
+        ocr_bruto = texto_ocr or dados_extracao.get("texto_ocr") or dados_extracao.get("texto_bruto") or ""
+        ocr_sanitizado = sanitizar_texto_ocr_planilha(ocr_bruto)
+
+        # Prepara a linha a ser inserida conforme as 10 colunas especificadas
         row_data = [
             data_formatada,
             estabelecimento,
@@ -294,8 +317,9 @@ def salvar_na_planilha(
             dados_extracao.get("pagamento", "Outros"),
             valor_numerico,
             sender_name,
-            formula_hyperlink,  # <--- Insere a fórmula do link clicável aqui
-            caption or ""
+            formula_hyperlink,  # Coluna 8 (H): Receipt Link (=HYPERLINK)
+            caption or "",      # Coluna 9 (I): Obs (Legenda do Telegram)
+            ocr_sanitizado      # Coluna 10 (J): OCR Text (Retorno textual completo do OCR.space)
         ]
 
         # IMPORTANTE: value_input_option='USER_ENTERED' faz o Google Sheets interpretar

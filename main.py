@@ -298,6 +298,7 @@ async def telegram_webhook(request: Request):
             dados["file_id"] = file_id
             dados["file_url"] = file_url
             dados["aba_mes"] = aba_mes_ano
+            dados["texto_ocr"] = texto_extraido
 
             # Salva dados extraídos temporariamente em memória usando o estado_id curto
             DADOS_TEMPORARIOS[estado_id] = dados
@@ -337,6 +338,7 @@ async def telegram_webhook(request: Request):
                 sender_name = dados.get("responsavel") or extrair_nome_remetente(callback.get("from", {}))
                 caption = dados.get("observacoes", "")
                 file_url = dados.get("file_url", "")
+                texto_ocr = dados.get("texto_ocr", "")
 
                 chave_assinatura = (
                     normalizar_data(dados.get("data", "")),
@@ -348,7 +350,8 @@ async def telegram_webhook(request: Request):
                     dados_extracao=dados,
                     sender_name=sender_name,
                     caption=caption,
-                    file_url=file_url
+                    file_url=file_url,
+                    texto_ocr=texto_ocr
                 )
 
                 if resultado.get("sucesso"):

@@ -124,6 +124,7 @@ export default function App() {
   const [activeMonthTab, setActiveMonthTab] = useState<string>('Todas as Abas');
   const [sheetFilter, setSheetFilter] = useState<string>('Todas');
   const [sheetSearch, setSheetSearch] = useState<string>('');
+  const [inspectedOcrRow, setInspectedOcrRow] = useState<SheetRow | null>(null);
 
   // Lista dinâmica de abas mensais existentes na planilha
   const availableMonthTabs = useMemo(() => {
@@ -390,6 +391,7 @@ export default function App() {
         responsavel: pending.responsavel,
         file_url: pending.file_url,
         formula_hyperlink: formulaHyperlink,
+        texto_ocr: pending.texto_bruto,
         token_origem: token,
       };
 
@@ -468,6 +470,7 @@ export default function App() {
       'Responsible',
       'Receipt Link (Formula)',
       'Obs',
+      'OCR Text',
     ];
     const rows = filteredSheetRows.map((r) => [
       r.aba_mes,
@@ -480,6 +483,7 @@ export default function App() {
       `"${r.responsavel.replace(/"/g, '""')}"`,
       `"${r.formula_hyperlink.replace(/"/g, '""')}"`,
       `"${r.observacoes.replace(/"/g, '""')}"`,
+      `"${r.texto_ocr.replace(/\n/g, ' | ').replace(/"/g, '""')}"`,
     ]);
     const csvContent = [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
     handleDownloadFile('planilha_gastos_telegram_ocr.csv', csvContent, 'text/csv');
@@ -497,6 +501,7 @@ export default function App() {
         row.responsavel.toLowerCase().includes(sheetSearch.toLowerCase()) ||
         row.aba_mes.toLowerCase().includes(sheetSearch.toLowerCase()) ||
         row.tipo_documento.toLowerCase().includes(sheetSearch.toLowerCase()) ||
+        row.texto_ocr.toLowerCase().includes(sheetSearch.toLowerCase()) ||
         row.forma_pagamento.toLowerCase().includes(sheetSearch.toLowerCase());
       return matchesMonth && matchesCat && matchesQuery;
     });
@@ -1118,8 +1123,8 @@ export default function App() {
                         <th className="py-2.5 px-3">Establishment</th>
                         <th className="py-2.5 px-3 text-right">Value</th>
                         <th className="py-2.5 px-3">Category</th>
-                        <th className="py-2.5 px-3">Responsible</th>
                         <th className="py-2.5 px-3">Receipt Link</th>
+                        <th className="py-2.5 px-3">OCR Text</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200 text-xs">
@@ -1131,7 +1136,7 @@ export default function App() {
                           <td className="py-2.5 px-3 font-mono tabular-nums text-slate-600 whitespace-nowrap">
                             {row.data}
                           </td>
-                          <td className="py-2.5 px-3 font-medium text-slate-900 max-w-[140px] truncate">
+                          <td className="py-2.5 px-3 font-medium text-slate-900 max-w-[130px] truncate">
                             {row.estabelecimento}
                           </td>
                           <td className="py-2.5 px-3 font-mono tabular-nums font-semibold text-slate-900 text-right whitespace-nowrap">
@@ -1139,9 +1144,6 @@ export default function App() {
                           </td>
                           <td className="py-2.5 px-3 text-slate-700 whitespace-nowrap">
                             {row.categoria}
-                          </td>
-                          <td className="py-2.5 px-3 font-medium text-slate-800 whitespace-nowrap">
-                            {row.responsavel}
                           </td>
                           <td className="py-2.5 px-3 whitespace-nowrap">
                             <a
@@ -1154,6 +1156,16 @@ export default function App() {
                               Ver Comprovante
                               <ExternalLink className="w-3 h-3" />
                             </a>
+                          </td>
+                          <td className="py-2.5 px-3 max-w-[160px]">
+                            <button
+                              type="button"
+                              onClick={() => setInspectedOcrRow(row)}
+                              className="font-mono text-[11px] text-slate-600 hover:text-blue-700 truncate block max-w-[150px] underline decoration-dotted cursor-pointer text-left"
+                              title={row.texto_ocr}
+                            >
+                              {row.texto_ocr.replace(/\n/g, ' · ')}
+                            </button>
                           </td>
                         </tr>
                       ))}
@@ -1336,7 +1348,7 @@ export default function App() {
                 ))}
               </div>
 
-              {/* Tabela de Alta Densidade com as 9 colunas de sheets_service.py */}
+              {/* Tabela de Alta Densidade com as 10 colunas de sheets_service.py */}
               <div className="overflow-x-auto border border-slate-200 rounded-lg">
                 <table className="w-full text-left border-collapse">
                   <thead>
@@ -1351,13 +1363,14 @@ export default function App() {
                       <th className="py-3 px-3">Responsible</th>
                       <th className="py-3 px-3">Receipt Link</th>
                       <th className="py-3 px-3">Obs</th>
+                      <th className="py-3 px-3">OCR Text</th>
                       <th className="py-3 px-3 text-right">Ação</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200 text-xs">
                     {filteredSheetRows.length === 0 ? (
                       <tr>
-                        <td colSpan={11} className="py-8 text-center text-slate-500">
+                        <td colSpan={12} className="py-8 text-center text-slate-500">
                           Nenhum lançamento encontrado para esta aba/filtro. Simule um novo recibo na aba{' '}
                           <button
                             type="button"
@@ -1408,15 +1421,25 @@ export default function App() {
                                 <ExternalLink className="w-3 h-3" />
                               </a>
                               <p
-                                className="font-mono text-[10px] text-slate-400 max-w-[170px] truncate"
+                                className="font-mono text-[10px] text-slate-400 max-w-[160px] truncate"
                                 title={row.formula_hyperlink}
                               >
                                 {row.formula_hyperlink}
                               </p>
                             </div>
                           </td>
-                          <td className="py-3 px-3 text-slate-600 max-w-[180px] truncate">
+                          <td className="py-3 px-3 text-slate-600 max-w-[160px] truncate">
                             {row.observacoes}
+                          </td>
+                          <td className="py-3 px-3 max-w-[200px]">
+                            <button
+                              type="button"
+                              onClick={() => setInspectedOcrRow(row)}
+                              className="font-mono text-[11px] text-slate-700 hover:text-blue-700 truncate block max-w-[190px] underline decoration-dotted cursor-pointer text-left"
+                              title="Clique para inspecionar o texto completo retornado pelo OCR.space"
+                            >
+                              {row.texto_ocr.replace(/\n/g, ' · ')}
+                            </button>
                           </td>
                           <td className="py-3 px-3 text-right whitespace-nowrap">
                             <button
@@ -1436,6 +1459,27 @@ export default function App() {
                   </tbody>
                 </table>
               </div>
+
+              {/* Painel de inspeção do texto completo do OCR quando o usuário clica na célula OCR Text */}
+              {inspectedOcrRow && (
+                <div className="p-4 bg-slate-900 text-slate-100 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-slate-300">
+                      Conteúdo da Coluna 10 (&quot;OCR Text&quot;) — {inspectedOcrRow.estabelecimento} ({inspectedOcrRow.data})
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setInspectedOcrRow(null)}
+                      className="px-2.5 py-1 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-md cursor-pointer"
+                    >
+                      Fechar
+                    </button>
+                  </div>
+                  <pre className="p-3 bg-slate-950 text-emerald-400 rounded-lg font-mono text-xs whitespace-pre-wrap leading-relaxed">
+                    {inspectedOcrRow.texto_ocr}
+                  </pre>
+                </div>
+              )}
             </div>
           </div>
         )}

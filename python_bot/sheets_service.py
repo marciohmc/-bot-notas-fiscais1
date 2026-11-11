@@ -18,7 +18,8 @@ CABECALHOS_PADRAO = [
     "Value",
     "Responsible",
     "Receipt Link",
-    "Obs"
+    "Obs",
+    "OCR Text"
 ]
 
 
@@ -124,6 +125,25 @@ def normalizar_valor_float(valor) -> float:
         return 0.0
 
 
+def sanitizar_texto_ocr_planilha(texto_ocr: str) -> str:
+    """
+    Prepara o texto bruto retornado pelo OCR.space para ser salvo com segurança em uma
+    célula do Google Sheets usando value_input_option='USER_ENTERED':
+    - Remove quebras de linha excessivas mantendo a leitura limpa
+    - Adiciona apóstrofo inicial caso comece com '=', '+' ou '-' (evita erro #ERROR! de fórmula)
+    - Respeita o limite de caracteres por célula do Google Sheets
+    """
+    if not texto_ocr:
+        return ""
+    linhas = [linha.strip() for linha in str(texto_ocr).splitlines() if linha.strip()]
+    texto_limpo = "\n".join(linhas).strip()
+
+    if texto_limpo.startswith(("=", "+", "-")):
+        texto_limpo = f"'{texto_limpo}"
+
+    return texto_limpo[:49000]
+
+
 def extrair_aba_mes_ano(data_str: str) -> str:
     """
     Extrai o mês e ano da data do recibo (Formato esperado: DD/MM/AAAA)
@@ -214,12 +234,13 @@ def salvar_na_planilha(
     dados_extracao: dict,
     sender_name: str,
     caption: str,
-    file_url: str
+    file_url: str,
+    texto_ocr: str = ""
 ) -> dict:
     """
     Insere os dados extraídos na aba correspondente ao mês/ano da despesa (ex: 11-2026),
-    adicionando o link oficial do Telegram formatado como hiperlink clicável na planilha
-    e bloqueando registros duplicados antes de inserir.
+    adicionando o link oficial do Telegram formatado como hiperlink clicável,
+    o texto bruto retornado pelo OCR.space (coluna 'OCR Text') e bloqueando duplicados.
     """
     try:
         sheet_id = (
@@ -244,8 +265,10 @@ def salvar_na_planilha(
             primeira_linha = worksheet.row_values(1)
             if not primeira_linha:
                 worksheet.append_row(CABECALHOS_PADRAO, value_input_option="USER_ENTERED")
+            elif "OCR Text" not in primeira_linha and len(primeira_linha) == 9:
+                worksheet.update_cell(1, 10, "OCR Text")
         except gspread.exceptions.WorksheetNotFound:
-            worksheet = spreadsheet.add_worksheet(title=mes_ano, rows=1000, cols=10)
+            worksheet = spreadsheet.add_worksheet(title=mes_ano, rows=1000, cols=12)
             worksheet.append_row(CABECALHOS_PADRAO, value_input_option="USER_ENTERED")
 
         checagem = verificar_duplicidade_na_aba(
@@ -272,6 +295,9 @@ def salvar_na_planilha(
             else "Sem link"
         )
 
+        ocr_bruto = texto_ocr or dados_extracao.get("texto_ocr") or dados_extracao.get("texto_bruto") or ""
+        ocr_sanitizado = sanitizar_texto_ocr_planilha(ocr_bruto)
+
         row_data = [
             data_formatada,
             estabelecimento,
@@ -281,7 +307,8 @@ def salvar_na_planilha(
             valor_numerico,
             sender_name,
             formula_hyperlink,
-            caption or ""
+            caption or "",
+            ocr_sanitizado
         ]
 
         worksheet.append_row(row_data, value_input_option="USER_ENTERED")

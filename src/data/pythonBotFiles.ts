@@ -34,6 +34,7 @@ export interface SheetRow {
   responsavel: string;
   file_url: string;
   formula_hyperlink: string;
+  texto_ocr: string;
   token_origem: string;
 }
 
@@ -148,6 +149,7 @@ export const INITIAL_SHEET_ROWS: SheetRow[] = [
     file_url: 'https://api.telegram.org/file/bot<TOKEN>/photos/file_84101_madeireira.jpg',
     formula_hyperlink:
       '=HYPERLINK("https://api.telegram.org/file/bot<TOKEN>/photos/file_84101_madeireira.jpg"; "Ver Comprovante")',
+    texto_ocr: `MADEIREIRA E MATERIAIS SAO JORGE\nCNPJ: 45.118.902/0001-10\nDATA DE EMISSAO: 07/11/2026\nNOTA FISCAL ELETRONICA\nITEM 01 SACOS DE CIMENTO CP-II R$ 890,00\nVALOR TOTAL R$ 890,00\nFORMA DE PAGAMENTO: PIX`,
     token_origem: 'f82a91c0',
   },
   {
@@ -164,6 +166,7 @@ export const INITIAL_SHEET_ROWS: SheetRow[] = [
     file_url: 'https://api.telegram.org/file/bot<TOKEN>/photos/file_84102_restaurante.jpg',
     formula_hyperlink:
       '=HYPERLINK("https://api.telegram.org/file/bot<TOKEN>/photos/file_84102_restaurante.jpg"; "Ver Comprovante")',
+    texto_ocr: `RESTAURANTE ESTRADA REAL LTDA\nCNPJ: 19.442.810/0001-04\nCUPOM FISCAL ELETRONICO - SAT\nDATA: 08/11/2026 12:41:09\n03 REFEICAO EXECUTIVAKG R$ 148,50\nTOTAL R$ 148,50 - CARTAO DE DEBITO`,
     token_origem: '3b19e7a4',
   },
   {
@@ -180,6 +183,7 @@ export const INITIAL_SHEET_ROWS: SheetRow[] = [
     file_url: 'https://api.telegram.org/file/bot<TOKEN>/documents/file_83990_locadora.pdf',
     formula_hyperlink:
       '=HYPERLINK("https://api.telegram.org/file/bot<TOKEN>/documents/file_83990_locadora.pdf"; "Ver Comprovante")',
+    texto_ocr: `LOCADORA DE EQUIPAMENTOS CENTRAL\nNOTA FISCAL DE LOCACAO DE BENS MOVEIS\nDATA: 22/10/2026\nLOCACAO MARTELETE ROMPEDOR 15KG - R$ 650,00\nVALOR LIQUIDO DA NOTA: R$ 650,00`,
     token_origem: '9d41a2b1',
   },
 ];
@@ -204,7 +208,8 @@ CABECALHOS_PADRAO = [
     "Value",
     "Responsible",
     "Receipt Link",
-    "Obs"
+    "Obs",
+    "OCR Text"
 ]
 
 
@@ -310,6 +315,24 @@ def normalizar_valor_float(valor) -> float:
         return 0.0
 
 
+def sanitizar_texto_ocr_planilha(texto_ocr: str) -> str:
+    """
+    Prepara o texto bruto retornado pelo OCR.space para ser salvo com segurança em uma
+    célula do Google Sheets usando value_input_option='USER_ENTERED':
+    - Remove quebras de linha excessivas mantendo a leitura limpa
+    - Adiciona apóstrofo inicial caso comece com '=', '+' ou '-' (evita erro #ERROR! de fórmula)
+    """
+    if not texto_ocr:
+        return ""
+    linhas = [linha.strip() for linha in str(texto_ocr).splitlines() if linha.strip()]
+    texto_limpo = "\\n".join(linhas).strip()
+
+    if texto_limpo.startswith(("=", "+", "-")):
+        texto_limpo = f"'{texto_limpo}"
+
+    return texto_limpo[:49000]
+
+
 def extrair_aba_mes_ano(data_str: str) -> str:
     """
     Extrai o mês e ano da data do recibo (Formato esperado: DD/MM/AAAA)
@@ -402,12 +425,13 @@ def salvar_na_planilha(
     dados_extracao: dict,
     sender_name: str,
     caption: str,
-    file_url: str
+    file_url: str,
+    texto_ocr: str = ""
 ) -> dict:
     """
     Insere os dados extraídos na aba correspondente ao mês/ano da despesa (ex: 11-2026),
-    adicionando o link oficial do Telegram formatado como hiperlink clicável na planilha
-    e bloqueando registros duplicados antes de inserir.
+    adicionando o link oficial do Telegram formatado como hiperlink clicável,
+    o texto bruto retornado pelo OCR.space (coluna 'OCR Text') e bloqueando duplicados.
     """
     try:
         sheet_id = (
@@ -432,8 +456,10 @@ def salvar_na_planilha(
             primeira_linha = worksheet.row_values(1)
             if not primeira_linha:
                 worksheet.append_row(CABECALHOS_PADRAO, value_input_option="USER_ENTERED")
+            elif "OCR Text" not in primeira_linha and len(primeira_linha) == 9:
+                worksheet.update_cell(1, 10, "OCR Text")
         except gspread.exceptions.WorksheetNotFound:
-            worksheet = spreadsheet.add_worksheet(title=mes_ano, rows=1000, cols=10)
+            worksheet = spreadsheet.add_worksheet(title=mes_ano, rows=1000, cols=12)
             worksheet.append_row(CABECALHOS_PADRAO, value_input_option="USER_ENTERED")
 
         # Checagem rigorosa de duplicidade antes de gravar
@@ -461,6 +487,9 @@ def salvar_na_planilha(
             else "Sem link"
         )
 
+        ocr_bruto = texto_ocr or dados_extracao.get("texto_ocr") or dados_extracao.get("texto_bruto") or ""
+        ocr_sanitizado = sanitizar_texto_ocr_planilha(ocr_bruto)
+
         row_data = [
             data_formatada,
             estabelecimento,
@@ -469,8 +498,9 @@ def salvar_na_planilha(
             dados_extracao.get("pagamento", "Outros"),
             valor_numerico,
             sender_name,
-            formula_hyperlink,
-            caption or ""
+            formula_hyperlink,  # Coluna 8 (H): Receipt Link (=HYPERLINK)
+            caption or "",      # Coluna 9 (I): Obs (Legenda do Telegram)
+            ocr_sanitizado      # Coluna 10 (J): OCR Text (Retorno textual completo do OCR.space)
         ]
 
         worksheet.append_row(row_data, value_input_option="USER_ENTERED")
@@ -771,6 +801,7 @@ async def telegram_webhook(request: Request):
             dados["file_id"] = file_id
             dados["file_url"] = file_url
             dados["aba_mes"] = aba_mes_ano
+            dados["texto_ocr"] = texto_extraido
 
             DADOS_TEMPORARIOS[estado_id] = dados
 
@@ -809,6 +840,7 @@ async def telegram_webhook(request: Request):
                 sender_name = dados.get("responsavel") or extrair_nome_remetente(callback.get("from", {}))
                 caption = dados.get("observacoes", "")
                 file_url = dados.get("file_url", "")
+                texto_ocr = dados.get("texto_ocr", "")
 
                 chave_assinatura = (
                     normalizar_data(dados.get("data", "")),
@@ -820,7 +852,8 @@ async def telegram_webhook(request: Request):
                     dados_extracao=dados,
                     sender_name=sender_name,
                     caption=caption,
-                    file_url=file_url
+                    file_url=file_url,
+                    texto_ocr=texto_ocr
                 )
 
                 if resultado.get("sucesso"):
